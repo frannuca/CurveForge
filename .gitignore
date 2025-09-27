@@ -1,0 +1,104 @@
+# C++ / CMake build artifacts
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+Testing/
+Makefile
+Makefile2
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+CMakeUserPresets.json
+
+# Object & binary files
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+*.stackdump
+
+# Intermediate / generated
+*.pch
+*.pid
+*.d
+*.mod
+*.gch
+
+# Debug / profiling / coverage
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.llvm
+
+# Crash dumps
+core
+core.*
+*.core
+
+# Logs
+*.log
+
+# Packaging / archives
+*.tar
+*.gz
+*.tgz
+*.zip
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*.user
+*.workspace
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Conan / Package managers
+conanbuild*
+conanrun*
+conaninstall*
+**/conan/**
+
+# Cache / temp
+*.tmp
+*.temp
+*.bak
+*~
+
+# Generated test binaries (if outside build dirs)
+run_spline_tests
+run_spline_smoothing_tests
+pricing_tests
+curveforge-cli
+
+# Optional: comment out if you want to commit
+# .env
+
