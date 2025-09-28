@@ -10,21 +10,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(CURVEFORGE_BUILD_TESTS "Build unit tests" ON)
-option(CURVEFORGE_BUILD_APPS  "Build applications" ON)
+option(CURVEFORGE_BUILD_APPS "Build applications" ON)
 option(CURVEFORGE_BUILD_SHARED "Build shared libs" OFF)
 
 if (CURVEFORGE_BUILD_SHARED)
     set(BUILD_SHARED_LIBS ON)
-endif()
+endif ()
 
 add_subdirectory(libs/mathx)
 add_subdirectory(libs/pricing)
+add_subdirectory(libs/time)
+add_subdirectory(libs/asynchelpers)
+
 
 if (CURVEFORGE_BUILD_APPS)
     add_subdirectory(apps/curveforge-cli)
-endif()
+endif ()
 
 if (CURVEFORGE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
-endif()
+endif ()

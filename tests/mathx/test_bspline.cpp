@@ -6,7 +6,6 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
-#include <memory>
 #include <Eigen/Dense>
 
 int main() {
@@ -14,16 +13,19 @@ int main() {
     // Data points to interpolate (2D curve y = x^2 scaled domain [0,1])
     std::vector<Eigen::VectorXd> data;
     int N = 9;
-    for (int i=0;i<N;++i){
-        Eigen::Vector2d pt; double x = double(i)/(N-1); pt<<x, x*x; data.push_back(pt);
+    for (int i = 0; i < N; ++i) {
+        Eigen::Vector2d pt;
+        double x = double(i) / (N - 1);
+        pt << x, x * x;
+        data.push_back(pt);
     }
     auto spline = bspline::interpolate(data, 3, "uniform");
 
     // Evaluate at original parameterization points and check closeness
-    for (int i=0;i<N;++i) {
-        double u = double(i)/(N-1);
+    for (int i = 0; i < N; ++i) {
+        double u = double(i) / (N - 1);
         auto val = spline.evaluate(u);
-        double expectedY = u*u;
+        double expectedY = u * u;
         assert(std::fabs(val[0]-u) < 1e-6); // x coordinate preserved
         assert(std::fabs(val[1]-expectedY) < 1e-3); // allow small interpolation tolerance
     }

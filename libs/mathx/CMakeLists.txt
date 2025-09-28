@@ -6,15 +6,17 @@ add_library(mathx
         src/mathx.cpp
         src/bspline.cpp
         include/mathx/bspline.h
+        ../time/include/time/instant.h
+        ../asynchelpers/include/asynchelpers/AwaitableHelpers.h
 )
 
 if (Eigen3_FOUND)
     message(STATUS "mathx: Eigen3 found, enabling Eigen features")
     target_link_libraries(mathx PUBLIC Eigen3::Eigen)
     target_compile_definitions(mathx PUBLIC MATHX_HAS_EIGEN=1)
-else()
+else ()
     message(STATUS "mathx: Eigen3 not found, building without Eigen")
-endif()
+endif ()
 
 
 target_include_directories(mathx
