@@ -12,6 +12,7 @@ namespace bond {
  * - Price bond futures
  * - Calculate conversion factors
  * - Compute implied repo rates
+ * - Compute implied forward rates
  * - Identify cheapest-to-deliver bond
  */
 class BondFuture {
@@ -49,6 +50,23 @@ public:
      * @return Implied repo rate
      */
     double impliedRepoRate(size_t bond_index, double bond_price, double futures_price) const;
+
+    /**
+     * Calculates the implied forward rate based on bond futures pricing.
+     * The forward rate represents the interest rate implied by the futures contract
+     * for the period from now to the futures maturity date.
+     * 
+     * Formula: r_forward = (1/T) * ln(Forward Price / Spot Price)
+     *          where Forward Price = Futures Price × Conversion Factor
+     * 
+     * @param bond_index Index of the bond in deliverable_bonds
+     * @param bond_price Current market price of the bond (clean price)
+     * @param futures_price Current futures price
+     * @return Implied forward rate (annualized, continuously compounded)
+     * @throws std::out_of_range if bond_index is out of range
+     * @throws std::invalid_argument if prices are non-positive
+     */
+    double impliedForwardRate(size_t bond_index, double bond_price, double futures_price) const;
 
     /**
      * Identifies the cheapest-to-deliver bond index.
