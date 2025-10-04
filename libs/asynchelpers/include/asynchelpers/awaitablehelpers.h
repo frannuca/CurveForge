@@ -7,6 +7,7 @@
 #pragma once
 #include <coroutine>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <thread>
 #include <tuple>
