@@ -31,3 +31,6 @@ if (CURVEFORGE_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif ()
+
+# Add examples directory
+add_subdirectory(examples)

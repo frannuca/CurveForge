@@ -58,3 +58,18 @@ target_link_libraries(run_async_tests
 
 add_test(NAME run_async_tests COMMAND run_async_tests)
 set_tests_properties(run_async_tests PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_OK")
+
+
+# Bond pricing test
+add_executable(run_bond_pricing_tests
+        pricing/test_bond_pricing.cpp
+)
+
+target_link_libraries(run_bond_pricing_tests
+        PRIVATE
+        CurveForge::pricing
+)
+
+add_test(NAME run_bond_pricing_tests COMMAND run_bond_pricing_tests)
+set_tests_properties(run_bond_pricing_tests PROPERTIES PASS_REGULAR_EXPRESSION "BOND_PRICING_OK")
+

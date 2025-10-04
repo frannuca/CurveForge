@@ -9,6 +9,10 @@ add_library(pricing
         src/irswap.cpp
         src/yield_curve.cpp
         src/bootstrapper.cpp
+        src/bond/bond.cpp
+        src/bond/carry_roll.cpp
+        src/bond/bond_future.cpp
+        src/bond/inss.cpp
 )
 
 target_include_directories(pricing

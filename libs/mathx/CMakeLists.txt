@@ -7,7 +7,7 @@ add_library(mathx
         src/bspline.cpp
         include/mathx/bspline.h
         ../time/include/time/instant.h
-        ../asynchelpers/include/asynchelpers/AwaitableHelpers.h
+        ../asynchelpers/include/asynchelpers/awaitablehelpers.h
 )
 
 if (Eigen3_FOUND)

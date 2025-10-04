@@ -1,5 +1,6 @@
 #include "time/daycount.hpp"
 #include <chrono>
+#include <cmath>
 using namespace curve::time;
 
 class DayCountConventionACT_360 : public DayCountConventionBase
