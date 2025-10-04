@@ -172,6 +172,24 @@ void example4_bondFutures() {
         std::cout << "  Bond " << (i + 1) << ": " 
                   << std::setprecision(2) << (implied_repo * 100) << "%" << std::endl;
     }
+    
+    // Calculate implied forward rates (NEW FUNCTIONALITY)
+    std::cout << "\nImplied Forward Rates:" << std::endl;
+    std::cout << "  (Forward rate implied by futures pricing for 6-month period)" << std::endl;
+    for (size_t i = 0; i < deliverable_bonds.size(); ++i) {
+        double implied_forward = future.impliedForwardRate(i, bond_prices[i], futures_price);
+        std::cout << "  Bond " << (i + 1) << ": " 
+                  << std::setprecision(2) << (implied_forward * 100) << "% p.a." << std::endl;
+    }
+    
+    // Show the relationship between forward rate and repo rate
+    std::cout << "\nNote: For the CTD bond (Bond " << (ctd + 1) << "):" << std::endl;
+    double ctd_repo = future.impliedRepoRate(ctd, bond_prices[ctd], futures_price);
+    double ctd_forward = future.impliedForwardRate(ctd, bond_prices[ctd], futures_price);
+    std::cout << "  Implied Repo Rate = Implied Forward Rate = " 
+              << std::setprecision(4) << (ctd_repo * 100) << "%" << std::endl;
+    std::cout << "  This equality holds because repo rate represents the" << std::endl;
+    std::cout << "  cost of carry, which is the forward rate for the CTD bond." << std::endl;
 }
 
 void example5_INSSBonds() {

@@ -134,6 +134,14 @@ void testBondFutures() {
     double implied_repo = future.impliedRepoRate(0, bond_prices[0], futures_price);
     std::cout << "  Implied repo rate: " << implied_repo << std::endl;
     
+    // Test implied forward rate
+    double implied_forward = future.impliedForwardRate(0, bond_prices[0], futures_price);
+    std::cout << "  Implied forward rate: " << implied_forward << std::endl;
+    
+    // For cost-of-carry model with no income on the bond, 
+    // implied forward rate should equal implied repo rate
+    assert(approxEqual(implied_forward, implied_repo, 1e-6));
+    
     // Test cheapest to deliver
     size_t ctd = future.cheapestToDeliver(bond_prices, 0.03);
     std::cout << "  Cheapest to deliver index: " << ctd << std::endl;
@@ -145,6 +153,84 @@ void testBondFutures() {
     assert(cf > 0.0);
     
     std::cout << "✓ Bond futures tests passed" << std::endl << std::endl;
+}
+
+void testImpliedForwardRate() {
+    std::cout << "Testing implied forward rate calculations..." << std::endl;
+    
+    // Create a simple bond future setup
+    Bond bond1(100.0, 0.05, 10.0, 2);
+    Bond bond2(100.0, 0.04, 8.0, 2);
+    
+    std::vector<Bond> deliverable_bonds = {bond1, bond2};
+    std::vector<double> conversion_factors = {0.95, 0.89};
+    
+    // 3-month futures contract
+    BondFuture future(0.25, deliverable_bonds, conversion_factors);
+    
+    // Test 1: Normal market conditions (contango)
+    std::vector<double> bond_prices = {102.0, 96.5};
+    double futures_price = 105.0;
+    
+    double forward_rate_1 = future.impliedForwardRate(0, bond_prices[0], futures_price);
+    std::cout << "  Test 1 - Forward rate (contango): " << forward_rate_1 << std::endl;
+    
+    // Forward price = futures_price * CF = 105.0 * 0.95 = 99.75
+    // forward_rate = ln(99.75 / 102.0) / 0.25 = ln(0.9779) / 0.25 ≈ -0.089
+    double expected_fr_1 = std::log(105.0 * 0.95 / 102.0) / 0.25;
+    assert(approxEqual(forward_rate_1, expected_fr_1, 1e-6));
+    
+    // Test 2: Higher futures price (positive carry)
+    futures_price = 110.0;
+    double forward_rate_2 = future.impliedForwardRate(0, bond_prices[0], futures_price);
+    std::cout << "  Test 2 - Forward rate (positive carry): " << forward_rate_2 << std::endl;
+    
+    double expected_fr_2 = std::log(110.0 * 0.95 / 102.0) / 0.25;
+    assert(approxEqual(forward_rate_2, expected_fr_2, 1e-6));
+    assert(forward_rate_2 > forward_rate_1);  // Higher futures price => higher forward rate
+    
+    // Test 3: Different bond
+    double forward_rate_3 = future.impliedForwardRate(1, bond_prices[1], futures_price);
+    std::cout << "  Test 3 - Forward rate (bond 2): " << forward_rate_3 << std::endl;
+    
+    double expected_fr_3 = std::log(110.0 * 0.89 / 96.5) / 0.25;
+    assert(approxEqual(forward_rate_3, expected_fr_3, 1e-6));
+    
+    // Test 4: Error handling - invalid bond index
+    try {
+        future.impliedForwardRate(10, 100.0, 105.0);
+        assert(false);  // Should not reach here
+    } catch (const std::out_of_range& e) {
+        std::cout << "  ✓ Caught expected out_of_range exception" << std::endl;
+    }
+    
+    // Test 5: Error handling - negative prices
+    try {
+        future.impliedForwardRate(0, -100.0, 105.0);
+        assert(false);  // Should not reach here
+    } catch (const std::invalid_argument& e) {
+        std::cout << "  ✓ Caught expected invalid_argument exception for negative price" << std::endl;
+    }
+    
+    // Test 6: Error handling - zero prices
+    try {
+        future.impliedForwardRate(0, 100.0, 0.0);
+        assert(false);  // Should not reach here
+    } catch (const std::invalid_argument& e) {
+        std::cout << "  ✓ Caught expected invalid_argument exception for zero price" << std::endl;
+    }
+    
+    // Test 7: Inverted market (backwardation)
+    futures_price = 95.0;
+    double forward_rate_4 = future.impliedForwardRate(0, bond_prices[0], futures_price);
+    std::cout << "  Test 7 - Forward rate (backwardation): " << forward_rate_4 << std::endl;
+    
+    // This should give a negative forward rate (backwardation)
+    double expected_fr_4 = std::log(95.0 * 0.95 / 102.0) / 0.25;
+    assert(approxEqual(forward_rate_4, expected_fr_4, 1e-6));
+    assert(forward_rate_4 < 0.0);  // Negative forward rate in backwardation
+    
+    std::cout << "✓ Implied forward rate tests passed" << std::endl << std::endl;
 }
 
 void testINSSBonds() {
@@ -214,6 +300,7 @@ int main() {
         testAccruedInterest();
         testCarryRoll();
         testBondFutures();
+        testImpliedForwardRate();
         testINSSBonds();
         testEdgeCases();
         

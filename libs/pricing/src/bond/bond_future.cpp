@@ -76,6 +76,37 @@ double BondFuture::impliedRepoRate(size_t bond_index, double bond_price,
     return repo;
 }
 
+double BondFuture::impliedForwardRate(size_t bond_index, double bond_price, 
+                                      double futures_price) const {
+    if (bond_index >= deliverable_bonds_.size()) {
+        throw std::out_of_range("Bond index out of range");
+    }
+    if (bond_price <= 0.0 || futures_price <= 0.0) {
+        throw std::invalid_argument("Prices must be positive");
+    }
+    if (futures_maturity_ <= 0.0) {
+        throw std::runtime_error("Futures maturity must be positive");
+    }
+
+    double cf = conversion_factors_[bond_index];
+    
+    // Forward price = Futures price * CF
+    double forward_price = futures_price * cf;
+    
+    if (forward_price <= bond_price) {
+        // If forward price <= spot price, the implied forward rate is non-positive
+        // This is valid in some market conditions (e.g., inverted yield curves)
+        // We still calculate it but it will be <= 0
+    }
+    
+    // Calculate implied forward rate using continuous compounding
+    // forward_price = bond_price * exp(r_forward * T)
+    // => r_forward = ln(forward_price / bond_price) / T
+    double forward_rate = std::log(forward_price / bond_price) / futures_maturity_;
+    
+    return forward_rate;
+}
+
 size_t BondFuture::cheapestToDeliver(const std::vector<double>& bond_prices, 
                                      double repo_rate) const {
     if (bond_prices.size() != deliverable_bonds_.size()) {
