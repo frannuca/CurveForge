@@ -2,11 +2,13 @@
 
 ## Overview
 
-A comprehensive bond pricing module has been successfully implemented for the CurveForge project. This module provides all the features requested in the problem statement and more.
+A comprehensive bond pricing module has been successfully implemented for the CurveForge project. This module provides
+all the features requested in the problem statement and more.
 
 ## Implemented Features
 
 ### 1. ✅ Yield to Price Conversion
+
 **Location**: `libs/pricing/include/pricing/bond/bond.hpp` and `src/bond/bond.cpp`
 
 - Implemented `Bond::priceFromYield()` method
@@ -16,34 +18,39 @@ A comprehensive bond pricing module has been successfully implemented for the Cu
 - Supports bonds with different payment frequencies (annual, semi-annual, quarterly, etc.)
 
 **Example**:
+
 ```cpp
 Bond bond(100.0, 0.05, 10.0, 2);  // 5% coupon, 10y maturity, semi-annual
 double price = bond.priceFromYield(0.04);  // Returns 108.18
 ```
 
 ### 2. ✅ Carry and Roll Analysis
+
 **Location**: `libs/pricing/include/pricing/bond/carry_roll.hpp` and `src/bond/carry_roll.cpp`
 
-- **Carry**: Income from coupon payments over holding period
+- **Carry**: Net income from coupon payments minus financial (funding) cost over the holding period
 - **Roll**: Price change from time passage and yield curve changes
 - **Total Return**: Carry + Roll
 - Includes scenario analysis for different yield assumptions
 
 **Features**:
-- `calculateCarryRoll()` - comprehensive carry and roll metrics
-- `calculateCarry()` - isolated carry calculation
+
+- `calculateCarryRoll()` - comprehensive carry and roll metrics (now includes funding cost)
+- `calculateCarry()` - isolated net carry calculation
 - `calculateRoll()` - isolated roll calculation
 - Support for yield curve changes (parallel shifts, steepening, etc.)
 
 **Example**:
+
 ```cpp
-CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.045, 0.5);
-// metrics.carry = coupon income over 6 months
+CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.045, 0.5, 0.03); // 3% funding rate
+// metrics.carry = net carry (coupon income minus funding cost)
 // metrics.roll = price change from time passage and yield change
 // metrics.total_return = carry + roll
 ```
 
 ### 3. ✅ Bond Futures Pricing
+
 **Location**: `libs/pricing/include/pricing/bond/bond_future.hpp` and `src/bond/bond_future.cpp`
 
 - Complete bond futures contract implementation
@@ -53,6 +60,7 @@ CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.045, 0.5);
 - **Net basis** calculation
 
 **Features**:
+
 - `BondFuture` class for futures contracts
 - `futuresPrice()` - theoretical futures price
 - `impliedRepoRate()` - calculate implied financing rate
@@ -61,6 +69,7 @@ CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.045, 0.5);
 - `calculateConversionFactor()` - standardized conversion factors
 
 **Example**:
+
 ```cpp
 BondFuture future(0.5, deliverable_bonds, conversion_factors);
 double futures_price = future.futuresPrice(bond_prices, 0.03);
@@ -69,6 +78,7 @@ double implied_repo = future.impliedRepoRate(0, bond_prices[0], futures_price);
 ```
 
 ### 4. ✅ INSS Pricing
+
 **Location**: `libs/pricing/include/pricing/bond/inss.hpp` and `src/bond/inss.cpp`
 
 - Dedicated module for INSS (Brazilian social security) bonds
@@ -76,6 +86,7 @@ double implied_repo = future.impliedRepoRate(0, bond_prices[0], futures_price);
 - Comprehensive INSS-specific metrics
 
 **Features**:
+
 - `INSSBond` class with tax considerations
 - `priceFromYield()` - after-tax pricing
 - `yieldFromPrice()` - after-tax yield calculation
@@ -84,6 +95,7 @@ double implied_repo = future.impliedRepoRate(0, bond_prices[0], futures_price);
 - `calculateINSSMetrics()` - comprehensive metrics including gross/net yields
 
 **Example**:
+
 ```cpp
 INSSBond inss_bond(100.0, 0.05, 10.0, 2, 0.15, false);  // 15% tax rate
 double price = inss_bond.priceFromYield(0.05);  // After-tax price
@@ -92,28 +104,32 @@ INSSMetrics metrics = calculateINSSMetrics(inss_bond, price);
 ```
 
 ### 5. ✅ Cheapest to Deliver
+
 **Location**: `libs/pricing/include/pricing/bond/bond_future.hpp`
 
 - Multiple methods for CTD analysis:
-  - `cheapestToDeliver()` - identifies CTD bond index
-  - `impliedRepoRate()` - repo rate implied by futures price
-  - `netBasis()` - net basis calculation
+    - `cheapestToDeliver()` - identifies CTD bond index
+    - `impliedRepoRate()` - repo rate implied by futures price
+    - `netBasis()` - net basis calculation
 - Compares all deliverable bonds to find optimal delivery choice
 
 ## Additional Features (Beyond Requirements)
 
 ### Duration and Convexity
+
 - **Macaulay Duration**: `duration()`
 - **Modified Duration**: `modifiedDuration()`
 - **Convexity**: `convexity()`
 - Accurate formulas for discrete compounding
 
 ### Accrued Interest
+
 - `accruedInterest()` method
 - Linear accrual between payment dates
 - Essential for bond pricing and settlement
 
 ### Price to Yield Conversion
+
 - `yieldFromPrice()` method
 - Newton-Raphson numerical solver
 - Handles all bond types (premium, discount, par)
@@ -149,6 +165,7 @@ examples/
 **Test Suite**: `tests/pricing/test_bond_pricing.cpp`
 
 Tests include:
+
 - Basic bond pricing (premium, discount, par)
 - Round-trip yield/price conversions
 - Duration and convexity calculations
@@ -177,7 +194,9 @@ BOND_PRICING_OK
 ## Documentation
 
 ### 1. API Documentation
+
 **File**: `libs/pricing/BOND_PRICING_README.md`
+
 - Comprehensive API reference
 - Usage examples for all features
 - Technical details and formulas
@@ -186,21 +205,25 @@ BOND_PRICING_OK
 - References to academic sources
 
 ### 2. Code Examples
+
 **File**: `examples/bond_pricing_examples.cpp`
+
 - Executable demonstration program
 - 5 comprehensive examples covering all features:
-  1. Basic Bond Pricing
-  2. Duration and Convexity
-  3. Carry and Roll Analysis
-  4. Bond Futures Pricing
-  5. INSS Bond Pricing
+    1. Basic Bond Pricing
+    2. Duration and Convexity
+    3. Carry and Roll Analysis
+    4. Bond Futures Pricing
+    5. INSS Bond Pricing
 
 **Run examples**:
+
 ```bash
 $ ./build/examples/bond_pricing_examples
 ```
 
 ### 3. Inline Documentation
+
 - All public methods have detailed Doxygen-style comments
 - Parameter descriptions
 - Return value documentation
@@ -266,4 +289,5 @@ The module is designed to be extended:
 ✅ Production-ready code with proper error handling
 ✅ Modular and extensible architecture
 
-The bond pricing module is ready for production use and provides a solid foundation for fixed-income analytics in the CurveForge project.
+The bond pricing module is ready for production use and provides a solid foundation for fixed-income analytics in the
+CurveForge project.

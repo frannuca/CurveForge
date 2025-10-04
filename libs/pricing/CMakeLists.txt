@@ -13,6 +13,7 @@ add_library(pricing
         src/bond/carry_roll.cpp
         src/bond/bond_future.cpp
         src/bond/inss.cpp
+        src/curvebase.cpp
 )
 
 target_include_directories(pricing

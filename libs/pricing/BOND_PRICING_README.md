@@ -2,7 +2,8 @@
 
 ## Overview
 
-The Bond Pricing Module provides comprehensive functionality for pricing and analyzing fixed-income securities. It includes support for:
+The Bond Pricing Module provides comprehensive functionality for pricing and analyzing fixed-income securities. It
+includes support for:
 
 1. **Basic Bond Pricing** - Yield-to-price and price-to-yield conversions
 2. **Carry and Roll Analysis** - Income and price change metrics
@@ -16,6 +17,7 @@ The Bond Pricing Module provides comprehensive functionality for pricing and ana
 The `Bond` class represents a fixed-coupon bond with periodic payments.
 
 #### Key Features:
+
 - Yield to price conversion using discrete compounding
 - Price to yield conversion using Newton-Raphson method
 - Accrued interest calculation
@@ -57,7 +59,8 @@ std::cout << "Convexity: " << convexity << std::endl;
 Analyze the expected return from holding a bond over a specific time horizon.
 
 #### Components:
-- **Carry**: Income from coupon payments
+
+- **Carry**: Net income from coupon payments minus financial (funding) cost
 - **Roll**: Price change from the passage of time (rolling down the yield curve)
 - **Total Return**: Carry + Roll
 
@@ -70,21 +73,22 @@ using namespace pricing::bond;
 
 Bond bond(100.0, 0.05, 10.0, 2);
 
+double funding_rate = 0.03; // 3% funding cost
 // Calculate carry and roll over 6 months
 // Assuming current yield is 5% and forward yield remains at 5%
-CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.05, 0.5);
+CarryRollMetrics metrics = calculateCarryRoll(bond, 0.05, 0.05, 0.5, funding_rate);
 
-std::cout << "Carry: $" << metrics.carry << std::endl;
+std::cout << "Carry (net): $" << metrics.carry << std::endl;
 std::cout << "Roll: $" << metrics.roll << std::endl;
 std::cout << "Total Return: $" << metrics.total_return << std::endl;
 
 // Output:
-// Carry: $2.50 (one coupon payment)
+// Carry: $2.50 (coupon) minus funding cost
 // Roll: $0.00 (minimal price change when yield is unchanged)
-// Total Return: $2.50
+// Total Return: carry + roll
 
 // Calculate with yield curve change
-CarryRollMetrics metrics2 = calculateCarryRoll(bond, 0.05, 0.045, 0.5);
+CarryRollMetrics metrics2 = calculateCarryRoll(bond, 0.05, 0.045, 0.5, funding_rate);
 std::cout << "Roll with yield decline: $" << metrics2.roll << std::endl;
 ```
 
@@ -93,6 +97,7 @@ std::cout << "Roll with yield decline: $" << metrics2.roll << std::endl;
 Price bond futures contracts and identify the cheapest-to-deliver bond.
 
 #### Key Features:
+
 - Futures pricing based on cost-of-carry
 - Implied repo rate calculation
 - Cheapest-to-deliver bond identification
@@ -143,9 +148,11 @@ std::cout << "Net basis: $" << net_basis << std::endl;
 
 ### 4. INSS Bond Pricing (`inss.hpp`)
 
-Price INSS (Instituto Nacional do Seguro Social) bonds, which are Brazilian social security bonds with specific tax treatment.
+Price INSS (Instituto Nacional do Seguro Social) bonds, which are Brazilian social security bonds with specific tax
+treatment.
 
 #### Key Features:
+
 - Tax-adjusted pricing (taxes on coupon payments)
 - After-tax yield calculation
 - Tax present value calculation
@@ -206,6 +213,7 @@ Where `PV_i` is the present value of cash flow at time `t_i`.
 ## Error Handling
 
 All functions include comprehensive error checking:
+
 - Invalid parameters throw `std::invalid_argument`
 - Numerical issues throw `std::runtime_error`
 - Out-of-range access throws `std::out_of_range`
@@ -216,8 +224,8 @@ The bond pricing module is included in the main `pricing` library:
 
 ```cmake
 target_link_libraries(your_target
-    PRIVATE
-    CurveForge::pricing
+        PRIVATE
+        CurveForge::pricing
 )
 ```
 
