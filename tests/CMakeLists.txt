@@ -73,3 +73,17 @@ target_link_libraries(run_bond_pricing_tests
 add_test(NAME run_bond_pricing_tests COMMAND run_bond_pricing_tests)
 set_tests_properties(run_bond_pricing_tests PROPERTIES PASS_REGULAR_EXPRESSION "BOND_PRICING_OK")
 
+
+# Optimizer test
+add_executable(run_optimizer_tests
+        pricing/test_optimizer.cpp
+)
+
+target_link_libraries(run_optimizer_tests
+        PRIVATE
+        CurveForge::pricing
+)
+
+add_test(NAME run_optimizer_tests COMMAND run_optimizer_tests)
+set_tests_properties(run_optimizer_tests PROPERTIES PASS_REGULAR_EXPRESSION "OPTIMIZER_OK")
+
