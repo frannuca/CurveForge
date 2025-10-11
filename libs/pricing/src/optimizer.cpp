@@ -291,6 +291,10 @@ CalibrationResult CurveOptimizer::calibrate() {
     // Build final curve
     result.curve = buildCurveFromForwards(forwards);
     
+    // Store pillar times and forward rates in the result
+    result.pillar_times = pillar_times_;
+    result.forward_rates = forwards;
+    
     // Compute residuals
     result.residuals.reserve(instruments_.size());
     for (const auto& cal_inst : instruments_) {

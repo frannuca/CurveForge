@@ -17,6 +17,7 @@ add_library(pricing
         src/bond/inss.cpp
         src/curvebase.cpp
         src/optimizer.cpp
+        src/tiled_curve.cpp
 )
 
 target_include_directories(pricing

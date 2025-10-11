@@ -25,12 +25,14 @@ struct CalibrationInstrument {
  * @brief Result of curve calibration
  */
 struct CalibrationResult {
-    YieldCurve curve;               // Calibrated yield curve
-    double objective_value;         // Final objective function value (weighted sum of squared errors)
-    std::vector<double> residuals;  // Individual residuals for each instrument
-    int iterations;                 // Number of optimization iterations
-    bool success;                   // Whether optimization converged successfully
-    std::string message;            // Status message
+    YieldCurve curve;                  // Calibrated yield curve
+    double objective_value;            // Final objective function value (weighted sum of squared errors)
+    std::vector<double> residuals;     // Individual residuals for each instrument
+    int iterations;                    // Number of optimization iterations
+    bool success;                      // Whether optimization converged successfully
+    std::string message;               // Status message
+    std::vector<double> pillar_times;  // Pillar times used for calibration
+    std::vector<double> forward_rates; // Calibrated instantaneous forward rates at pillars
 };
 
 /**

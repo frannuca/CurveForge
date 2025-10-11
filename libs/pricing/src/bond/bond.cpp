@@ -202,5 +202,21 @@ double Bond::convexity(double yield) const {
     return weighted_time_sq / (price * std::pow(1.0 + yield / frequency, 2));
 }
 
+double Bond::priceFromCurve(const std::function<double(double)>& discount_fn) const {
+    if (coupon_times_.empty()) {
+        throw std::logic_error("Bond has no cash flows");
+    }
+    
+    double price = 0.0;
+    for (size_t i = 0; i < coupon_times_.size(); ++i) {
+        double t = coupon_times_[i];
+        double cf = coupon_amounts_[i];
+        double df = discount_fn(t);
+        price += cf * df;
+    }
+    
+    return price;
+}
+
 } // namespace bond
 } // namespace pricing
