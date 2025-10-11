@@ -27,3 +27,17 @@ target_link_libraries(optimizer_example
 set_target_properties(optimizer_example PROPERTIES
         OUTPUT_NAME "optimizer_example"
 )
+
+# Regularization Demo executable
+add_executable(regularization_demo
+        regularization_demo.cpp
+)
+
+target_link_libraries(regularization_demo
+        PRIVATE
+        CurveForge::pricing
+)
+
+set_target_properties(regularization_demo PROPERTIES
+        OUTPUT_NAME "regularization_demo"
+)
