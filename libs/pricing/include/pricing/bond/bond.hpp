@@ -82,6 +82,14 @@ namespace pricing {
              */
             double convexity(double yield) const;
 
+            /**
+             * Calculates the bond price using a discount curve.
+             *
+             * @param discount_fn Discount function D(t) that returns the discount factor at time t
+             * @return Bond price (present value of all cash flows)
+             */
+            double priceFromCurve(const std::function<double(double)>& discount_fn) const;
+
             // Accessors
             double faceValue() const { return face_value_; }
             double couponRate() const { return coupon_rate_; }

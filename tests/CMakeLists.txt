@@ -87,3 +87,17 @@ target_link_libraries(run_optimizer_tests
 add_test(NAME run_optimizer_tests COMMAND run_optimizer_tests)
 set_tests_properties(run_optimizer_tests PROPERTIES PASS_REGULAR_EXPRESSION "OPTIMIZER_OK")
 
+
+# TiledCurve test
+add_executable(run_tiled_curve_tests
+        pricing/test_tiled_curve.cpp
+)
+
+target_link_libraries(run_tiled_curve_tests
+        PRIVATE
+        CurveForge::pricing
+)
+
+add_test(NAME run_tiled_curve_tests COMMAND run_tiled_curve_tests)
+set_tests_properties(run_tiled_curve_tests PROPERTIES PASS_REGULAR_EXPRESSION "TILED_CURVE_OK")
+
