@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
+find_package(NLopt REQUIRED)
+
 add_library(pricing
         src/engine.cpp
         src/curve.cpp
@@ -14,6 +16,7 @@ add_library(pricing
         src/bond/bond_future.cpp
         src/bond/inss.cpp
         src/curvebase.cpp
+        src/optimizer.cpp
 )
 
 target_include_directories(pricing
@@ -25,6 +28,7 @@ target_include_directories(pricing
 target_link_libraries(pricing
         PUBLIC
         CurveForge::mathx
+        NLopt::nlopt
 )
 
 add_library(CurveForge::pricing ALIAS pricing)
