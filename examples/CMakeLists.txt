@@ -41,3 +41,17 @@ target_link_libraries(regularization_demo
 set_target_properties(regularization_demo PROPERTIES
         OUTPUT_NAME "regularization_demo"
 )
+
+# TiledCurve Example executable
+add_executable(tiled_curve_example
+        tiled_curve_example.cpp
+)
+
+target_link_libraries(tiled_curve_example
+        PRIVATE
+        CurveForge::pricing
+)
+
+set_target_properties(tiled_curve_example PROPERTIES
+        OUTPUT_NAME "tiled_curve_example"
+)
