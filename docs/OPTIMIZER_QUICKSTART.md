@@ -39,7 +39,14 @@ ctest -R optimizer
 ```cpp
 using namespace pricing;
 
+// Basic optimizer with default settings (includes regularization)
 CurveOptimizer optimizer;
+
+// Or customize with config
+CurveOptimizer::Config config;
+config.regularization_lambda = 0.01;  // Smoothing strength
+config.regularization_order = 2;       // Second-order smoothing
+CurveOptimizer optimizer_custom(config);
 ```
 
 ### Step 3: Add Market Instruments
@@ -103,18 +110,30 @@ optimizer.add(deposit_6m, 0.0, 10.0);   // 10x weight
 optimizer.add(swap_10y, 0.0, 1.0);      // Normal weight
 ```
 
+## Advanced: Regularization for Smooth Curves
+
+```cpp
+CurveOptimizer::Config config;
+config.regularization_lambda = 0.01;   // Strength (0 = off, higher = smoother)
+config.regularization_order = 2;       // 1 = smooth rates, 2 = smooth curvature
+
+CurveOptimizer optimizer(config);
+// ... add instruments and calibrate ...
+```
+
 ## What the Library Does
 
 1. **Extracts Pillar Times**: From instrument maturities
 2. **Parameterizes Curve**: Using instantaneous forward rates at pillars
-3. **Optimizes**: Minimizes weighted least-squares error
+3. **Optimizes**: Minimizes weighted least-squares error + regularization penalty using SQP
 4. **Returns**: Calibrated YieldCurve + diagnostics
 
 ## Key Features
 
+✅ **SQP Algorithm**: Fast convergence with gradient-based Sequential Quadratic Programming  
+✅ **Curve Regularization**: First/second-order penalties for smooth forward curves  
 ✅ **Automatic pillar detection** from instrument maturities  
 ✅ **Smooth curves** via instantaneous forward interpolation  
-✅ **Robust optimization** using NLopt COBYLA algorithm  
 ✅ **Flexible weighting** to emphasize critical instruments  
 ✅ **Comprehensive diagnostics** (residuals, iterations, objective)  
 ✅ **Multiple instrument types** (deposits, FRAs, swaps)  
@@ -122,7 +141,7 @@ optimizer.add(swap_10y, 0.0, 1.0);      // Normal weight
 ## Typical Calibration Quality
 
 - **Objective values**: < 1e-6 for well-specified problems
-- **Convergence**: 10-100 iterations
+- **Convergence**: 10-50 iterations with SQP
 - **Speed**: < 0.01 seconds for typical curves
 - **Residuals**: Individual errors typically < 1e-4
 

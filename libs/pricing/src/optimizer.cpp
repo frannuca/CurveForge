@@ -12,6 +12,8 @@ struct OptimizationData {
     const CurveOptimizer* optimizer;
     const std::vector<CalibrationInstrument>* instruments;
     const std::vector<double>* pillar_times;
+    double regularization_lambda;
+    int regularization_order;
 };
 
 // Static objective function for NLopt (C API)
@@ -38,7 +40,7 @@ static double objectiveFunction(unsigned n, const double* x, double* grad, void*
         curve.add(pillars[i], df);
     }
     
-    // Compute sum of squared errors
+    // Compute sum of squared errors (data fitting term)
     double sum_sq_error = 0.0;
     for (const auto& cal_inst : *opt_data->instruments) {
         // Compute model price using the curve
@@ -62,7 +64,100 @@ static double objectiveFunction(unsigned n, const double* x, double* grad, void*
         }
     }
     
-    return sum_sq_error;
+    // Add regularization penalty for curve smoothness
+    double regularization_penalty = 0.0;
+    if (opt_data->regularization_lambda > 0.0 && n > 1) {
+        if (opt_data->regularization_order == 1) {
+            // First-order regularization: penalize changes in forward rates (first derivative)
+            // Σ (f[i] - f[i-1])²
+            for (size_t i = 1; i < n; ++i) {
+                double diff = forwards[i] - forwards[i-1];
+                regularization_penalty += diff * diff;
+            }
+        } else {
+            // Second-order regularization: penalize changes in the slope (second derivative)
+            // Σ (f[i+1] - 2*f[i] + f[i-1])²
+            for (size_t i = 1; i < n - 1; ++i) {
+                double second_diff = forwards[i+1] - 2.0 * forwards[i] + forwards[i-1];
+                regularization_penalty += second_diff * second_diff;
+            }
+        }
+        regularization_penalty *= opt_data->regularization_lambda;
+    }
+    
+    // Total objective: data fitting error + regularization penalty
+    double objective = sum_sq_error + regularization_penalty;
+    
+    // Compute gradient if requested (for SQP algorithm)
+    if (grad) {
+        // Initialize gradient to zero
+        for (size_t i = 0; i < n; ++i) {
+            grad[i] = 0.0;
+        }
+        
+        // Numerical gradient approximation using finite differences
+        const double epsilon = 1e-7;
+        for (size_t i = 0; i < n; ++i) {
+            // Save original value
+            double original = forwards[i];
+            
+            // Forward difference: f(x + h)
+            forwards[i] = original + epsilon;
+            
+            // Rebuild curve with perturbed forwards
+            YieldCurve curve_plus;
+            curve_plus.add(pillars[0], std::exp(-forwards[0] * pillars[0]));
+            for (size_t j = 1; j < pillars.size(); ++j) {
+                double dt = pillars[j] - pillars[j-1];
+                double avg_forward = 0.5 * (forwards[j-1] + forwards[j]);
+                double prev_df = curve_plus.discount(pillars[j-1]);
+                double df = prev_df * std::exp(-avg_forward * dt);
+                curve_plus.add(pillars[j], df);
+            }
+            
+            // Compute objective with perturbed forward
+            double sum_sq_error_plus = 0.0;
+            for (const auto& cal_inst : *opt_data->instruments) {
+                try {
+                    auto discount_fn = [&curve_plus](double t) { return curve_plus.discount(t); };
+                    double solved_df = cal_inst.instrument->solveDiscount(discount_fn);
+                    double maturity = cal_inst.instrument->maturity();
+                    double curve_df = curve_plus.discount(maturity);
+                    double error = (curve_df - solved_df) * cal_inst.weight;
+                    sum_sq_error_plus += error * error;
+                } catch (const std::exception& e) {
+                    sum_sq_error_plus += 1e6;
+                }
+            }
+            
+            // Add regularization penalty gradient
+            double reg_penalty_plus = 0.0;
+            if (opt_data->regularization_lambda > 0.0 && n > 1) {
+                if (opt_data->regularization_order == 1) {
+                    for (size_t j = 1; j < n; ++j) {
+                        double diff = forwards[j] - forwards[j-1];
+                        reg_penalty_plus += diff * diff;
+                    }
+                } else {
+                    for (size_t j = 1; j < n - 1; ++j) {
+                        double second_diff = forwards[j+1] - 2.0 * forwards[j] + forwards[j-1];
+                        reg_penalty_plus += second_diff * second_diff;
+                    }
+                }
+                reg_penalty_plus *= opt_data->regularization_lambda;
+            }
+            
+            double objective_plus = sum_sq_error_plus + reg_penalty_plus;
+            
+            // Compute gradient using finite difference
+            grad[i] = (objective_plus - objective) / epsilon;
+            
+            // Restore original value
+            forwards[i] = original;
+        }
+    }
+    
+    return objective;
 }
 
 CurveOptimizer::CurveOptimizer(const Config& config) 
@@ -142,7 +237,8 @@ CalibrationResult CurveOptimizer::calibrate() {
     
     // Setup optimization
     size_t n_params = pillar_times_.size();
-    nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, n_params);  // Derivative-free local optimizer
+    // Use SLSQP (Sequential Least Squares Programming) - a gradient-based SQP algorithm
+    nlopt_opt opt = nlopt_create(NLOPT_LD_SLSQP, n_params);
     
     if (!opt) {
         result.message = "Failed to create NLopt optimizer";
@@ -160,11 +256,13 @@ CalibrationResult CurveOptimizer::calibrate() {
     nlopt_set_ftol_abs(opt, config_.absolute_tolerance);
     nlopt_set_maxeval(opt, config_.max_iterations);
     
-    // Set objective function
+    // Set objective function with regularization parameters
     OptimizationData opt_data;
     opt_data.optimizer = this;
     opt_data.instruments = &instruments_;
     opt_data.pillar_times = &pillar_times_;
+    opt_data.regularization_lambda = config_.regularization_lambda;
+    opt_data.regularization_order = config_.regularization_order;
     
     nlopt_set_min_objective(opt, objectiveFunction, &opt_data);
     

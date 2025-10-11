@@ -36,9 +36,13 @@ struct CalibrationResult {
 /**
  * @brief Optimizer for calibrating yield curves to market instrument prices
  * 
- * This class uses NLopt to minimize the least square error between observed
- * market prices and computed prices. The curve is parameterized using instantaneous
- * forward rates at specified pillar points.
+ * This class uses NLopt's SLSQP (Sequential Least Squares Programming) algorithm,
+ * which is a gradient-based Sequential Quadratic Programming (SQP) method, to minimize
+ * the least square error between observed market prices and computed prices. The curve
+ * is parameterized using instantaneous forward rates at specified pillar points.
+ * 
+ * The optimizer supports curve regularization to promote smooth forward curves by
+ * penalizing rapid changes in forward rates (first-order) or their slope (second-order).
  */
 class CurveOptimizer {
 public:
@@ -50,12 +54,16 @@ public:
         double absolute_tolerance;      // Absolute tolerance for convergence (default 1e-8)
         int max_iterations;             // Maximum number of iterations (default 1000)
         double initial_forward_rate;    // Initial guess for forward rates (default 0.03)
+        double regularization_lambda;   // Regularization strength for curve smoothing (default 0.01)
+        int regularization_order;       // Order of regularization: 1 (first derivative) or 2 (second derivative, default)
         
         Config() 
             : relative_tolerance(1e-6)
             , absolute_tolerance(1e-8)
             , max_iterations(1000)
-            , initial_forward_rate(0.03) {}
+            , initial_forward_rate(0.03)
+            , regularization_lambda(0.01)
+            , regularization_order(2) {}
     };
     
     /**

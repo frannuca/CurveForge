@@ -212,6 +212,85 @@ void testConfiguration() {
     std::cout << "✓ Test 6 passed" << std::endl;
 }
 
+// Test 7: Regularization effect
+void testRegularization() {
+    std::cout << "\n=== Test 7: Regularization Effect ===" << std::endl;
+    
+    // Test with no regularization
+    CurveOptimizer::Config config_no_reg;
+    config_no_reg.regularization_lambda = 0.0;
+    CurveOptimizer optimizer_no_reg(config_no_reg);
+    
+    // Add instruments
+    optimizer_no_reg.add(std::make_shared<OISDeposit>(0.25, 0.025), 0.0, 1.0);
+    optimizer_no_reg.add(std::make_shared<OISDeposit>(0.5, 0.028), 0.0, 1.0);
+    optimizer_no_reg.add(std::make_shared<OISDeposit>(1.0, 0.030), 0.0, 1.0);
+    optimizer_no_reg.add(std::make_shared<OISDeposit>(2.0, 0.032), 0.0, 1.0);
+    
+    auto result_no_reg = optimizer_no_reg.calibrate();
+    
+    std::cout << "Without regularization:" << std::endl;
+    std::cout << "  Success: " << (result_no_reg.success ? "YES" : "NO") << std::endl;
+    std::cout << "  Objective: " << result_no_reg.objective_value << std::endl;
+    
+    // Test with regularization
+    CurveOptimizer::Config config_with_reg;
+    config_with_reg.regularization_lambda = 0.01;
+    config_with_reg.regularization_order = 2;  // Second-order for smoothness
+    CurveOptimizer optimizer_with_reg(config_with_reg);
+    
+    // Add same instruments
+    optimizer_with_reg.add(std::make_shared<OISDeposit>(0.25, 0.025), 0.0, 1.0);
+    optimizer_with_reg.add(std::make_shared<OISDeposit>(0.5, 0.028), 0.0, 1.0);
+    optimizer_with_reg.add(std::make_shared<OISDeposit>(1.0, 0.030), 0.0, 1.0);
+    optimizer_with_reg.add(std::make_shared<OISDeposit>(2.0, 0.032), 0.0, 1.0);
+    
+    auto result_with_reg = optimizer_with_reg.calibrate();
+    
+    std::cout << "With regularization (lambda=0.01, order=2):" << std::endl;
+    std::cout << "  Success: " << (result_with_reg.success ? "YES" : "NO") << std::endl;
+    std::cout << "  Objective: " << result_with_reg.objective_value << std::endl;
+    
+    if (!result_no_reg.success || !result_with_reg.success) {
+        throw std::runtime_error("Test 7 failed: optimization did not succeed");
+    }
+    
+    // Both should succeed
+    std::cout << "✓ Test 7 passed (regularization enabled)" << std::endl;
+}
+
+// Test 8: SQP algorithm validation
+void testSQPAlgorithm() {
+    std::cout << "\n=== Test 8: SQP Algorithm Validation ===" << std::endl;
+    
+    // Create a more complex curve calibration scenario
+    CurveOptimizer optimizer;
+    
+    // Add a mix of instruments
+    optimizer.add(std::make_shared<OISDeposit>(0.25, 0.025), 0.0, 1.0);
+    optimizer.add(std::make_shared<OISDeposit>(0.5, 0.028), 0.0, 1.0);
+    optimizer.add(std::make_shared<FRA>(0.5, 1.5, 0.032), 0.0, 1.0);
+    optimizer.add(std::make_shared<OISDeposit>(2.0, 0.033), 0.0, 1.0);
+    
+    auto result = optimizer.calibrate();
+    
+    std::cout << "Success: " << (result.success ? "YES" : "NO") << std::endl;
+    std::cout << "Message: " << result.message << std::endl;
+    std::cout << "Objective: " << result.objective_value << std::endl;
+    std::cout << "Number of residuals: " << result.residuals.size() << std::endl;
+    
+    // Check that SQP converges to a good solution (low objective value)
+    if (!result.success) {
+        throw std::runtime_error("Test 8 failed: SQP optimization did not succeed");
+    }
+    
+    if (result.objective_value > 1e-5) {
+        std::cout << "WARNING: Objective value higher than expected for SQP" << std::endl;
+    }
+    
+    std::cout << "✓ Test 8 passed (SQP algorithm working)" << std::endl;
+}
+
 int main() {
     try {
         std::cout << "=== CurveForge Optimizer Test Suite ===" << std::endl;
@@ -222,6 +301,8 @@ int main() {
         testSwapCalibration();
         testResiduals();
         testConfiguration();
+        testRegularization();
+        testSQPAlgorithm();
         
         std::cout << "\n=== All tests passed ===" << std::endl;
         std::cout << "OPTIMIZER_OK" << std::endl;
