@@ -2,14 +2,15 @@
 
 ## Overview
 
-The CurveForge Optimization Library provides a sophisticated framework for calibrating yield curves to market instrument prices using numerical optimization. The library minimizes the least square error between observed market prices and model-computed prices while ensuring the curve is smooth and well-behaved.
+The CurveForge Optimization Library provides a sophisticated framework for calibrating yield curves to market instrument prices using Sequential Quadratic Programming (SQP). The library minimizes the least square error between observed market prices and model-computed prices while ensuring the curve is smooth and well-behaved through regularization techniques.
 
 ## Key Features
 
-- **NLopt Integration**: Uses the NLopt library for robust, derivative-free optimization
+- **SQP Algorithm**: Uses NLopt's SLSQP (Sequential Least Squares Programming), a gradient-based SQP method for efficient optimization
+- **Curve Regularization**: Supports first-order and second-order regularization for smooth forward curves
 - **Instantaneous Forward Calibration**: Parameterizes curves using instantaneous forward rates for smoothness
 - **Modular Design**: Clean separation between optimization logic and instrument pricing
-- **Flexible Configuration**: Customizable convergence criteria and optimization parameters
+- **Flexible Configuration**: Customizable convergence criteria, regularization strength, and optimization parameters
 - **Comprehensive Diagnostics**: Detailed residuals and convergence information
 - **Multi-Instrument Support**: Works with deposits, FRAs, swaps, and other curve instruments
 
@@ -17,20 +18,25 @@ The CurveForge Optimization Library provides a sophisticated framework for calib
 
 ### Core Components
 
-1. **CurveOptimizer**: Main optimization engine
+1. **CurveOptimizer**: Main optimization engine using SQP algorithm
 2. **CalibrationInstrument**: Wrapper combining instruments with market data
 3. **CalibrationResult**: Contains calibrated curve and diagnostic information
-4. **Config**: Configuration for optimization parameters
+4. **Config**: Configuration for optimization parameters, including regularization settings
 
 ### Design Principles
 
+- **SQP Optimization**: Uses Sequential Quadratic Programming for fast convergence with gradient information
 - **Instantaneous Forward Parameterization**: The curve is represented using instantaneous forward rates at pillar points (extracted from instrument maturities)
 - **Discount Factor Conversion**: Forward rates are converted to discount factors using:
   ```
   D(t) = exp(-∫₀ᵗ f(s) ds)
   ```
   where the integral is approximated using the trapezoidal rule
-- **Least Squares Objective**: Minimizes weighted sum of squared errors between market-implied and curve-implied discount factors
+- **Regularized Objective**: Minimizes weighted sum of squared errors plus regularization penalty:
+  ```
+  Objective = Σᵢ wᵢ(DFₘₐᵣₖₑₜ - DFcurve)² + λ × Regularization
+  ```
+  where the regularization term penalizes non-smooth forward curves
 
 ## Usage
 
@@ -115,6 +121,29 @@ optimizer.add(std::make_shared<OISDeposit>(0.5, 0.028), 0.0, 10.0);
 optimizer.add(std::make_shared<OISDeposit>(5.0, 0.040), 0.0, 1.0);
 ```
 
+### Regularization for Smooth Curves
+
+Control curve smoothness using regularization parameters:
+
+```cpp
+CurveOptimizer::Config config;
+config.regularization_lambda = 0.01;     // Regularization strength
+config.regularization_order = 2;         // Second-order (smooth curvature)
+
+CurveOptimizer optimizer(config);
+
+// Add instruments...
+auto result = optimizer.calibrate();
+
+// The resulting curve will be smoother due to regularization
+```
+
+**Regularization Options:**
+- `regularization_lambda = 0.0`: No regularization (pure data fitting)
+- `regularization_lambda > 0.0`: Increasing values produce smoother curves
+- `regularization_order = 1`: Penalize changes in forward rates (first derivative)
+- `regularization_order = 2`: Penalize changes in slope (second derivative, default)
+
 ## API Reference
 
 ### CurveOptimizer
@@ -139,7 +168,7 @@ Adds a calibration instrument with market price and weight.
 ```cpp
 CalibrationResult calibrate()
 ```
-Performs optimization and returns calibrated curve with diagnostics.
+Performs SQP optimization and returns calibrated curve with diagnostics.
 
 **pillarTimes**
 ```cpp
@@ -155,6 +184,8 @@ Configuration options for the optimizer:
 - `absolute_tolerance` (double): Absolute convergence tolerance (default: 1e-8)
 - `max_iterations` (int): Maximum optimization iterations (default: 1000)
 - `initial_forward_rate` (double): Initial guess for forward rates (default: 0.03)
+- `regularization_lambda` (double): Regularization strength for curve smoothing (default: 0.01)
+- `regularization_order` (int): Order of regularization - 1 (first derivative) or 2 (second derivative, default)
 
 ### CalibrationResult
 
@@ -179,10 +210,11 @@ Structure holding:
 
 ### Optimization Algorithm
 
-The library uses **COBYLA** (Constrained Optimization BY Linear Approximations) from NLopt:
-- Derivative-free method suitable for noisy objectives
+The library uses **SLSQP** (Sequential Least Squares Programming) from NLopt:
+- Gradient-based SQP (Sequential Quadratic Programming) method
+- Uses gradient information computed via finite differences
 - Handles bound constraints on forward rates (0.1% to 20%)
-- Robust for curve calibration problems
+- Efficient and robust for smooth curve calibration problems
 
 ### Forward Rate Parameterization
 
@@ -199,22 +231,39 @@ This ensures:
 
 ### Objective Function
 
-The objective minimizes:
+The objective minimizes the sum of data fitting error and regularization penalty:
 
 ```
-Σᵢ wᵢ × (DFₘₐᵣₖₑₜ(Tᵢ) - DFcurve(Tᵢ))²
+Objective = Σᵢ wᵢ × (DFₘₐᵣₖₑₜ(Tᵢ) - DFcurve(Tᵢ))² + λ × R(f)
 ```
 
 where:
 - `wᵢ` is the instrument weight
 - `DFₘₐᵣₖₑₜ(Tᵢ)` is the discount factor implied by market instrument
 - `DFcurve(Tᵢ)` is the discount factor from calibrated curve
+- `λ` is the regularization parameter
+- `R(f)` is the regularization term
+
+### Regularization Terms
+
+**First-order regularization** (smoothness in forward rates):
+```
+R₁(f) = Σᵢ (f[i] - f[i-1])²
+```
+
+**Second-order regularization** (smoothness in curvature):
+```
+R₂(f) = Σᵢ (f[i+1] - 2f[i] + f[i-1])²
+```
+
+Second-order regularization is recommended for most applications as it produces curves with smooth curvature while allowing gradual changes in forward rates.
 
 ## Performance Considerations
 
 - **Pillar Selection**: Number of pillars equals number of unique instrument maturities
-- **Convergence**: Typical calibration converges in 10-100 iterations
+- **Convergence**: Typical calibration converges in 10-50 iterations with SQP
 - **Objective Values**: Well-calibrated curves achieve objectives < 1e-6
+- **Gradient Computation**: Uses finite differences with epsilon = 1e-7
 
 ## Testing
 
