@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.21)
 
+# cmake
+# Put this at the very top of `CMakeLists.txt` (before project())
+if (NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(_vcpkg_dir "${CMAKE_SOURCE_DIR}/vcpkg")
+    set(_vcpkg_toolchain "${_vcpkg_dir}/scripts/buildsystems/vcpkg.cmake")
+    if (EXISTS "${_vcpkg_toolchain}")
+        message(STATUS "Enabling vcpkg toolchain: ${_vcpkg_toolchain}")
+        set(CMAKE_TOOLCHAIN_FILE "${_vcpkg_toolchain}" CACHE STRING "Vcpkg toolchain file" FORCE)
+    endif ()
+endif ()
+
+# ... then your usual cmake_minimum_required / project() / targets ...
+# Example: find_package will now pick packages declared in `vcpkg.json`
+# find_package(Boost REQUIRED COMPONENTS uuid)
+
 project(CurveForge
         VERSION 0.1.0
         DESCRIPTION "Rates calibration multiproject (libs + apps + tests)"
@@ -12,15 +27,18 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(CURVEFORGE_BUILD_TESTS "Build unit tests" ON)
 option(CURVEFORGE_BUILD_APPS "Build applications" ON)
 option(CURVEFORGE_BUILD_SHARED "Build shared libs" OFF)
+option(BOOST_BUILD_IF_MISSING "Build boost libs" ON)
+
 
 if (CURVEFORGE_BUILD_SHARED)
     set(BUILD_SHARED_LIBS ON)
 endif ()
 
-add_subdirectory(libs/mathx)
-add_subdirectory(libs/pricing)
+
+add_subdirectory(libs/interpolation)
+#add_subdirectory(libs/pricing)
 add_subdirectory(libs/time)
-add_subdirectory(libs/asynchelpers)
+add_subdirectory(libs/instruments)
 
 
 if (CURVEFORGE_BUILD_APPS)

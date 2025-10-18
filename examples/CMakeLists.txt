@@ -1,57 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Bond Pricing Examples executable
-add_executable(bond_pricing_examples
-        bond_pricing_examples.cpp
-)
-
-target_link_libraries(bond_pricing_examples
-        PRIVATE
-        CurveForge::pricing
-)
-
-set_target_properties(bond_pricing_examples PROPERTIES
-        OUTPUT_NAME "bond_pricing_examples"
-)
 
 # Optimizer Examples executable
 add_executable(optimizer_example
         optimizer_example.cpp
 )
 
-target_link_libraries(optimizer_example
-        PRIVATE
-        CurveForge::pricing
-)
 
 set_target_properties(optimizer_example PROPERTIES
         OUTPUT_NAME "optimizer_example"
-)
-
-# Regularization Demo executable
-add_executable(regularization_demo
-        regularization_demo.cpp
-)
-
-target_link_libraries(regularization_demo
-        PRIVATE
-        CurveForge::pricing
-)
-
-set_target_properties(regularization_demo PROPERTIES
-        OUTPUT_NAME "regularization_demo"
-)
-
-# TiledCurve Example executable
-add_executable(tiled_curve_example
-        tiled_curve_example.cpp
-)
-
-target_link_libraries(tiled_curve_example
-        PRIVATE
-        CurveForge::pricing
-)
-
-set_target_properties(tiled_curve_example PROPERTIES
-        OUTPUT_NAME "tiled_curve_example"
 )

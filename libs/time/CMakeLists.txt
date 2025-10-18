@@ -4,6 +4,9 @@ add_library(time
         src/calendar_factory.cpp
         src/calendars.cpp
         src/daycount.cpp
+        src/scheduler.cpp
+        src/date_modifier.cpp
+        include/time/scheduler.h
 )
 
 
