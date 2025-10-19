@@ -7,12 +7,8 @@ cmake_minimum_required(VERSION 3.21)
 find_package(Boost REQUIRED COMPONENTS uuid)
 
 set(INSTRUMENT_SOURCES
-        src/bond.cpp
-        src/european_option.cpp
-        src/forward.cpp
-        src/fra.cpp
         src/swap.cpp
-        src/InstrumentBase.cpp
+        include/instruments/Basket.h
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})

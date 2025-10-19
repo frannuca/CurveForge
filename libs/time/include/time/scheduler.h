@@ -13,8 +13,8 @@ namespace curve {
         class Scheduler {
         public:
             static std::vector<Date> generate_schedule(Date start_date, Date end_date,
-                                                       const int &freq_monhts,
-                                                       CalendarBase &calendar, const BusinessDayConvention &bdc,
+                                                       const std::chrono::months &freq_monhts,
+                                                       const CalendarBase &calendar, const BusinessDayConvention &bdc,
                                                        bool include_start_date);
         };
     } // time

@@ -16,7 +16,7 @@ int main() {
     auto schedule_vector = curve::time::Scheduler::generate_schedule(
         year{2025} / 10 / 1,
         year{2035} / 10 / 6,
-        3,
+        std::chrono::months{3},
         *(curve::time::create_calendar(curve::time::FinancialCalendar::NYSE)),
         curve::time::BusinessDayConvention::FOLLOWING,
         true

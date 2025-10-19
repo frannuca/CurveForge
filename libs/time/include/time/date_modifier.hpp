@@ -25,7 +25,7 @@ namespace curve::time {
         static Date add_business_days(const Date &d, int business_days_count, const CalendarBase &cal);
 
         // Add months/years, preserving day where possible; if resulting day is invalid, use month-end
-        static Date add_months(const Date &d, int months_count);
+        static Date add_months(const Date &d, std::chrono::months months_count);
 
         static Date add_years(const Date &d, int years_count);
 

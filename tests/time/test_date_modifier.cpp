@@ -16,7 +16,7 @@ int main() {
 
     // add_months edge-case: Jan 31 -> Feb 28 (2025 not a leap year)
     Date jan31 = year{2025} / January / day{31};
-    Date febTarget = DateModifier::add_months(jan31, 1);
+    Date febTarget = DateModifier::add_months(jan31, std::chrono::months{1});
     Date expectedFeb = year{2025} / February / day{28};
     assert(sys_days{febTarget} == sys_days{expectedFeb});
 

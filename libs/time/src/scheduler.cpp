@@ -8,8 +8,8 @@
 namespace curve {
     namespace time {
         std::vector<Date> Scheduler::generate_schedule(Date start_date, Date end_date,
-                                                       const int &freq_monhts,
-                                                       CalendarBase &calendar, const BusinessDayConvention &bdc,
+                                                       const std::chrono::months &freq_monhts,
+                                                       const CalendarBase &calendar, const BusinessDayConvention &bdc,
                                                        bool include_start_date) {
             if (start_date > end_date) { throw std::invalid_argument("start_date > end_date"); }
 

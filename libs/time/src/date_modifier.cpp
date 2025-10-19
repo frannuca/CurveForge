@@ -23,12 +23,12 @@ namespace curve::time {
         return date;
     }
 
-    Date DateModifier::add_months(const Date &d, int months_count) {
+    Date DateModifier::add_months(const Date &d, std::chrono::months months_count) {
         year_month_day ymd = d;
-        months delta{months_count};
+
 
         // Compute target year_month
-        year_month ym = year_month{ymd.year(), ymd.month()} + delta;
+        year_month ym = year_month{ymd.year(), ymd.month()} + months_count;
 
         // Try to keep the same day
         year_month_day candidate = year_month_day{ym / ymd.day()};

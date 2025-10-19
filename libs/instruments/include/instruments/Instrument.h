@@ -6,26 +6,20 @@
 #include <optional>
 
 namespace curve::instruments {
-    class InstrumentBase {
+    class Instrument {
     public:
-        InstrumentBase() = delete;
-
-        InstrumentBase(time::Date maturity, time::Date start_date);
-
-        virtual ~InstrumentBase() = default;
-
-        // Basic interface
-        virtual double notional() const = 0;
-
-        // Present value - pure virtual so derived classes can override
-        virtual double pv() const = 0;
+        Instrument(double notional) : notional_(notional) {
+        };
 
         virtual std::string name() const = 0;
 
+        double notional() const { return notional_; }
+
         // Read-only property: identifier
         const std::string &id() const { return id_; }
-        const time::Date maturity_date;
-        const time::Date start_date;
+
+        virtual ~Instrument() {
+        }
 
     protected:
         // Allow derived classes to set the id during construction or initialization
@@ -33,5 +27,6 @@ namespace curve::instruments {
 
     private:
         std::string id_;
+        double notional_;
     };
 } // namespace instruments
