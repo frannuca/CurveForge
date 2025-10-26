@@ -1,14 +1,18 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Require Boost::uuid for the instruments library. Prefer managing Boost via vcpkg
-# or system package manager. Users should configure CMake with:
-#   -DCMAKE_TOOLCHAIN_FILE=/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
-# and ensure `vcpkg install boost-uuid` was run for the desired triplet.
-find_package(Boost REQUIRED COMPONENTS uuid)
+# Set policy CMP0167 to OLD to preserve the FindBoost module behavior and suppress warning.
+if (POLICY CMP0167)
+    cmake_policy(SET CMP0167 OLD)
+endif ()
 
 set(INSTRUMENT_SOURCES
         src/swap.cpp
         include/instruments/Basket.h
+        include/instruments/Leg.h
+        src/Leg.cpp
+        include/market/marketdata.h
+        include/curves/ICurve.h
+        include/volatility/IVolatility.h
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})

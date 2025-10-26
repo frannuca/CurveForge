@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 
 # Optimizer Examples executable
 add_executable(optimizer_example
-        optimizer_example.cpp
+        advanced_multi_curve.cpp
 )
 
 

@@ -8,12 +8,7 @@
 namespace curve::instruments {
     class Instrument {
     public:
-        Instrument(double notional) : notional_(notional) {
-        };
-
         virtual std::string name() const = 0;
-
-        double notional() const { return notional_; }
 
         // Read-only property: identifier
         const std::string &id() const { return id_; }
@@ -27,6 +22,5 @@ namespace curve::instruments {
 
     private:
         std::string id_;
-        double notional_;
     };
 } // namespace instruments
