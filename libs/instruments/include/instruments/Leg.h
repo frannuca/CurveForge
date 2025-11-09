@@ -4,12 +4,14 @@
 
 #ifndef CURVEFORGE_LEG_H
 #define CURVEFORGE_LEG_H
+#include "Instrument.h"
 #include "time/calendars.hpp"
 #include "time/date.hpp"
 #include "time/date_modifier.hpp"
+#include "time/scheduler.h"
 
 namespace curve::instruments {
-    class Leg {
+    class Leg : public Instrument {
     public:
         enum LegType {
             FIXED, FLOATING
@@ -17,19 +19,12 @@ namespace curve::instruments {
 
         Leg(const double &notional, std::string currency, time::Date start_date, time::Date end_date,
             const std::chrono::months &freq_monhts, const time::CalendarBase &calendar,
-            const time::BusinessDayConvention &bdc, const LegType &leg_type);
+            const time::BusinessDayConvention &bdc, const time::DayCountConventionBase &dc, const LegType &leg_type);
 
-        const std::vector<time::Date> &cashflows_dates() const;
+        const time::Schedule &cashflows_schedule() const;
 
     private:
-        std::vector<time::Date> cashflows_;
-        const time::CalendarBase &calendar;
-        const int freq_payment_months;
-        const time::Date start_date;
-        const time::Date end_date;
-        const double notional;
-        const std::string currency;
-        const time::BusinessDayConvention &bdc_;
+        time::Schedule schedule_;
         LegType leg_type_;
     };
 }

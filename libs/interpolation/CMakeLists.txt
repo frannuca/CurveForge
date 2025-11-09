@@ -4,6 +4,9 @@ find_package(Eigen3 REQUIRED CONFIG)
 
 add_library(interpolation
         src/bspline.cpp
+        include/interpolation/linear.h
+        src/linear.cpp
+        include/interpolation/linear.h
 )
 
 if (Eigen3_FOUND)

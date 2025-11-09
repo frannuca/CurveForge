@@ -8,10 +8,18 @@
 namespace curve::instruments {
     class Instrument {
     public:
+        Instrument(std::string &&ccy) : currency_(std::move(ccy)) {
+        }
+
+        Instrument(const std::string &ccy) : currency_(ccy) {
+        }
+
         virtual std::string name() const = 0;
 
         // Read-only property: identifier
         const std::string &id() const { return id_; }
+
+        const std::string currency() const;
 
         virtual ~Instrument() {
         }
@@ -22,5 +30,6 @@ namespace curve::instruments {
 
     private:
         std::string id_;
+        std::string currency_;
     };
 } // namespace instruments

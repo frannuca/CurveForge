@@ -11,7 +11,6 @@ set(INSTRUMENT_SOURCES
         include/instruments/Leg.h
         src/Leg.cpp
         include/market/marketdata.h
-        include/curves/ICurve.h
         include/volatility/IVolatility.h
 )
 
@@ -19,6 +18,7 @@ add_library(instruments ${INSTRUMENT_SOURCES})
 
 # Link internal project dependencies
 target_link_libraries(instruments PUBLIC CurveForge::time)
+target_link_libraries(instruments PUBLIC CurveForge::interpolation)
 
 # Link Boost::uuid
 if (TARGET Boost::uuid)

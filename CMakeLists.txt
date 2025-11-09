@@ -36,6 +36,7 @@ endif ()
 
 
 add_subdirectory(libs/interpolation)
+add_subdirectory(libs/curve)
 #add_subdirectory(libs/pricing)
 add_subdirectory(libs/time)
 add_subdirectory(libs/instruments)

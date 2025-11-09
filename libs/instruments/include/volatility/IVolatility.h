@@ -18,7 +18,7 @@ namespace curve {
             IVolatility(IVolatility::VolatilitySurfaceType type) : type_(type) {
             }
 
-            virtual double volatility(double x, const time::Instant &maturity) = 0;
+            virtual double volatility(double s, const time::Date &maturity) = 0;
 
         protected:
             VolatilitySurfaceType type_;

@@ -5,9 +5,9 @@
 #include "time/scheduler.h"
 
 namespace curve::instruments {
-    const std::vector<time::Date> &Swap::get_leg1_payment_dates() const { return leg1_.cashflows_dates(); }
+    const time::Schedule &Swap::get_leg1_payment_dates() const { return leg1_.cashflows_schedule(); }
 
-    const std::vector<time::Date> &Swap::get_leg2_payment_dates() const { return leg2_.cashflows_dates(); }
+    const time::Schedule &Swap::get_leg2_payment_dates() const { return leg2_.cashflows_schedule(); }
 
     std::string Swap::name() const {
         return "Swap";
