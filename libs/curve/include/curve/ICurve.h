@@ -28,6 +28,10 @@ namespace curve {
         double F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::days &tenor,
                  const time::DayCountConventionBase &dc) const;
 
+        double F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::months &tenor,
+                 const time::DayCountConventionBase &dc) const;
+
+
         virtual std::string name() const =0;
 
         friend class ICurveCalibration;

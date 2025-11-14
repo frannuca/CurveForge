@@ -41,6 +41,15 @@ double ICurve::D(const std::chrono::days &t) const {
     return v1 + (v2 - v1) * (t.count() - t1) / dt;
 }
 
+double ICurve::F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::months &tenor,
+                 const time::DayCountConventionBase &dc) const {
+    auto t1 = std::chrono::sys_days(t0) + dt1;
+    auto t2 = t1 + tenor;
+
+    std::chrono::days tenorInDays = std::chrono::duration_cast<std::chrono::days>(t2 - t1);
+    return F(t0, dt1, tenorInDays, dc);
+}
+
 double ICurve::F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::days &tenor,
                  const time::DayCountConventionBase &dc) const {
     auto D1 = D(dt1);
