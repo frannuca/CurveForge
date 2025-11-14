@@ -9,20 +9,15 @@
 #include "ICurve.h"
 
 namespace curve {
-    class ICurveCalibration {
+    class ICurveCalibration : ICurve {
     public:
         virtual ~ICurveCalibration() = default;
 
-        ICurveCalibration(ICurve &c);
-
-        virtual void set_last_pillar(const time::Instant &t, double value);
+        virtual void set_last_pillar(const std::chrono::days &dt, double value);
 
         virtual void set_last_pillar(double value);
 
-        ICurve &get_curve();
-
-    private:
-        ICurve &curve_;
+        const ICurve &get_curve() const;
     };
 }
 #endif //CURVEFORGE_ICURVECALIBRATION_H

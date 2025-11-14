@@ -10,9 +10,9 @@
 namespace curve {
     class Pillar {
     public:
-        Pillar(time::Instant &&time_to_maturity, double value);
+        Pillar(std::chrono::days &&dt, double value);
 
-        Pillar(const time::Instant &time_to_maturity, double value);
+        Pillar(const std::chrono::days &dt, double value);
 
         Pillar(const Pillar &other);
 
@@ -23,13 +23,15 @@ namespace curve {
         // Make the class assignable so vector erase/move-shift works
         Pillar &operator=(Pillar &) = default;
 
-        Pillar &operator=(Pillar &&) noexcept = delete;
+        Pillar &operator=(Pillar &&) noexcept = default;
 
         [[nodiscard]] Pillar create_new(double new_value) const;
 
         [[nodiscard]] const double &get_value() const;
 
-        [[nodiscard]] const time::Instant &get_time() const;
+        [[nodiscard]] const time::Instant &get_time(const time::Instant &t0) const;
+
+        [[nodiscard]] const std::chrono::days &get_dt() const;
 
         // Equality and comparison operators
         inline bool operator==(const Pillar &other) const noexcept {
@@ -51,7 +53,7 @@ namespace curve {
         inline bool operator>=(const Pillar &other) const noexcept { return !(*this < other); }
 
     private:
-        time::Instant time;
+        std::chrono::days time;
         double value;
     };
 }

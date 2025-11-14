@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 set(CURVE_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Pillar.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ICurveCalibration.cpp
+        src/ICurve.cpp
 )
 
 add_library(curve ${CURVE_SOURCES})

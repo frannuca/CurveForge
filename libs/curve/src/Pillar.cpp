@@ -4,12 +4,12 @@
 #include "curve/Pillar.h"
 
 namespace curve {
-    Pillar::Pillar(time::Instant &&time_to_maturity, double value)
-        : time(std::move(time_to_maturity)), value(value) {
+    Pillar::Pillar(std::chrono::days &&dt, double value)
+        : time(std::move(dt)), value(value) {
     }
 
-    Pillar::Pillar(const time::Instant &time_to_maturity, double value)
-        : time(time_to_maturity), value(value) {
+    Pillar::Pillar(const std::chrono::days &dt, double value)
+        : time(dt), value(value) {
     }
 
     Pillar::Pillar(const Pillar &other)
@@ -20,7 +20,6 @@ namespace curve {
         : time(std::move(other.time)), value(std::move(other.value)) {
     }
 
-
     Pillar Pillar::create_new(double new_value) const {
         // Provide a thread-local copy with the updated value to avoid returning a dangling reference.
         return Pillar(this->time, new_value);
@@ -30,7 +29,11 @@ namespace curve {
         return value;
     }
 
-    const time::Instant &Pillar::get_time() const {
+    const std::chrono::days &Pillar::get_dt() const {
         return time;
+    }
+
+    const time::Instant &Pillar::get_time(const time::Instant &t0) const {
+        return (t0 + time);
     }
 } // namespace curve

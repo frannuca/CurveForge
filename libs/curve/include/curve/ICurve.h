@@ -7,14 +7,26 @@
 #include <chrono>
 
 #include "Pillar.h"
+#include "time/daycount.hpp"
 #include "time/instant.h"
 
 namespace curve {
     class ICurve {
     public:
-        virtual double D(const time::Instant &t) const = 0;
+        ICurve(std::vector<Pillar> &&pillars);
 
-        virtual double F(const time::Instant &t, const time::Instant &maturity) const = 0;
+        ICurve(const std::vector<Pillar> &pillars);
+
+        ICurve() = delete;
+
+        virtual ~ICurve() = default;
+
+        ICurve(const ICurve &other) = default;
+
+        double D(const std::chrono::days &t) const;
+
+        double F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::days &tenor,
+                 const time::DayCountConventionBase &dc) const;
 
         virtual std::string name() const =0;
 
@@ -22,11 +34,6 @@ namespace curve {
 
     protected:
         std::vector<Pillar> pillars_;
-    };
-
-    class ICalibrationCurve : public ICurve {
-    public:
-        virtual void set_last(double knot, double v) = 0;
     };
 } // curve
 #endif //CURVEFORGE_ICURVE_H
