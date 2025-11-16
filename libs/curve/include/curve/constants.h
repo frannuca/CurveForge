@@ -8,6 +8,6 @@
 
 namespace curve {
     constexpr double EPS_RATE = 1e-9;
-    constexpr std::chrono::milliseconds EPS_INSTANT_MS{1};
+    constexpr std::chrono::days EPS_INSTANT{1};
 }
 #endif //CURVEFORGE_CONSTANTS_H

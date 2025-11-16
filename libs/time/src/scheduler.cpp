@@ -22,6 +22,7 @@ namespace curve {
                         DateModifier::adjust(DateModifier::add_months(current_date, -freq_monhts), bdc, calendar);
                 double accrued = dc.year_fraction(current_date, modified_end_date);
                 accruals.push_back({current_date, modified_end_date, accrued});
+                modified_end_date = current_date;
             }
 
             return {accruals, freq_monhts, bdc, dc, calendar};

@@ -13,9 +13,11 @@
 namespace curve {
     class ICurve {
     public:
-        ICurve(std::vector<Pillar> &&pillars);
+        ICurve(const time::Date &cob_date, std::vector<Pillar> &&pillars,
+               std::shared_ptr<time::DayCountConventionBase> convention);
 
-        ICurve(const std::vector<Pillar> &pillars);
+        ICurve(const time::Date &cob_date, const std::vector<Pillar> &pillars,
+               std::shared_ptr<time::DayCountConventionBase> convention);
 
         ICurve() = delete;
 
@@ -23,21 +25,18 @@ namespace curve {
 
         ICurve(const ICurve &other) = default;
 
-        double D(const std::chrono::days &t) const;
+        [[nodiscard]] double D(const time::Date &d) const;
 
-        double F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::days &tenor,
-                 const time::DayCountConventionBase &dc) const;
+        [[nodiscard]] double F(const time::Date &t1, const time::Date &t2) const;
 
-        double F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::months &tenor,
-                 const time::DayCountConventionBase &dc) const;
-
-
-        virtual std::string name() const =0;
+        [[nodiscard]] virtual std::string name() const =0;
 
         friend class ICurveCalibration;
 
     protected:
         std::vector<Pillar> pillars_;
+        const time::Date cob_date;
+        std::shared_ptr<time::DayCountConventionBase> dc;
     };
 } // curve
 #endif //CURVEFORGE_ICURVE_H

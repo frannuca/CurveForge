@@ -3,6 +3,8 @@
   "version-string": "0.1.0",
   "dependencies": [
     "eigen3",
+    "boost-filesystem",
+    "boost-system",
     "boost-uuid"
   ]
 }

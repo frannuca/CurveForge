@@ -6,22 +6,21 @@
 #define CURVEFORGE_PILLAR_H
 #include "time/instant.h"
 #include "constants.h"
+#include "time/date.hpp"
 
 namespace curve {
     class Pillar {
     public:
-        Pillar(std::chrono::days &&dt, double value);
+        Pillar(const time::Date &t, double value);
 
-        Pillar(const std::chrono::days &dt, double value);
+        Pillar(const Pillar &other) = default;
 
-        Pillar(const Pillar &other);
-
-        Pillar(Pillar &&other) noexcept;
+        Pillar(Pillar &&other) noexcept = default;
 
         Pillar() = delete;
 
         // Make the class assignable so vector erase/move-shift works
-        Pillar &operator=(Pillar &) = default;
+        Pillar &operator=(const Pillar &) = default;
 
         Pillar &operator=(Pillar &&) noexcept = default;
 
@@ -29,14 +28,14 @@ namespace curve {
 
         [[nodiscard]] const double &get_value() const;
 
-        [[nodiscard]] const time::Instant &get_time(const time::Instant &t0) const;
-
-        [[nodiscard]] const std::chrono::days &get_dt() const;
+        [[nodiscard]] const time::Date &get_time() const;
 
         // Equality and comparison operators
         inline bool operator==(const Pillar &other) const noexcept {
-            auto dt = this->time > other.time ? this->time - other.time : other.time - this->time;
-            return dt < EPS_INSTANT_MS && std::abs(value - other.value) < EPS_RATE;
+            auto dt = this->date > other.date
+                          ? std::chrono::sys_days(this->date) - std::chrono::sys_days(other.date)
+                          : std::chrono::sys_days(other.date) - std::chrono::sys_days(this->date);
+            return dt < EPS_INSTANT && std::abs(value - other.value) < EPS_RATE;
         }
 
         inline bool operator!=(const Pillar &other) const noexcept {
@@ -45,7 +44,7 @@ namespace curve {
 
         // Strict weak ordering: compare by time first, then by value
         inline bool operator<(const Pillar &other) const noexcept {
-            return this->time < other.time;
+            return this->date < other.date;
         }
 
         inline bool operator>(const Pillar &other) const noexcept { return other < *this; }
@@ -53,7 +52,7 @@ namespace curve {
         inline bool operator>=(const Pillar &other) const noexcept { return !(*this < other); }
 
     private:
-        std::chrono::days time;
+        time::Date date;
         double value;
     };
 }

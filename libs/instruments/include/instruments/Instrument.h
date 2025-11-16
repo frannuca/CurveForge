@@ -8,21 +8,16 @@
 namespace curve::instruments {
     class Instrument {
     public:
-        Instrument(std::string &&ccy) : currency_(std::move(ccy)) {
-        }
+        explicit Instrument(std::string ccy);
 
-        Instrument(const std::string &ccy) : currency_(ccy) {
-        }
-
-        virtual std::string name() const = 0;
+        [[nodiscard]] virtual std::string name() const = 0;
 
         // Read-only property: identifier
-        const std::string &id() const { return id_; }
+        [[nodiscard]] const std::string &id() const { return id_; }
 
-        const std::string currency() const;
+        [[nodiscard]] std::string currency() const;
 
-        virtual ~Instrument() {
-        }
+        virtual ~Instrument() = default;
 
     protected:
         // Allow derived classes to set the id during construction or initialization
@@ -32,4 +27,8 @@ namespace curve::instruments {
         std::string id_;
         std::string currency_;
     };
+
+    inline std::string Instrument::currency() const {
+        return currency_;
+    }
 } // namespace instruments

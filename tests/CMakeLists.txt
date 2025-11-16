@@ -27,6 +27,21 @@ add_test(NAME run_spline_smoothing_tests COMMAND run_spline_smoothing_tests)
 set_tests_properties(run_spline_smoothing_tests PROPERTIES PASS_REGULAR_EXPRESSION "SMOOTH_OK")
 
 
+# swap test
+add_executable(run_swap_tests
+        instruments/test_swap.cpp
+)
+
+target_link_libraries(run_swap_tests
+        PRIVATE
+        CurveForge::instruments
+        CurveForge::curve
+        CurveForge::time
+)
+
+add_test(NAME run_swap_tests COMMAND run_swap_tests)
+set_tests_properties(run_swap_tests PROPERTIES PASS_REGULAR_EXPRESSION "SWAP_OK")
+
 # time  test
 add_executable(run_calendar_tests
         time/test_calendars.cpp

@@ -1,10 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
 
-# Set policy CMP0167 to OLD to preserve the FindBoost module behavior and suppress warning.
-if (POLICY CMP0167)
-    cmake_policy(SET CMP0167 OLD)
-endif ()
-
 set(INSTRUMENT_SOURCES
         src/swap.cpp
         include/instruments/Basket.h
@@ -12,22 +7,25 @@ set(INSTRUMENT_SOURCES
         src/Leg.cpp
         include/market/marketdata.h
         include/volatility/IVolatility.h
+        src/Instrument.cpp
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})
 
+find_package(Boost REQUIRED COMPONENTS uuid)
+
+if (Boost_FOUND)
+    message(STATUS "Found Boost::uuid")
+    target_link_libraries(instruments PUBLIC Boost::uuid)
+else ()
+    message(FATAL_ERROR "Boost::uuid not found")
+endif ()
+
 # Link internal project dependencies
 target_link_libraries(instruments PUBLIC CurveForge::time)
 target_link_libraries(instruments PUBLIC CurveForge::interpolation)
+target_link_libraries(instruments PUBLIC CurveForge::curve)
 
-# Link Boost::uuid
-if (TARGET Boost::uuid)
-    target_link_libraries(instruments PRIVATE Boost::uuid)
-else ()
-    # Fallback (older CMake/FindBoost behavior)
-    target_include_directories(instruments PRIVATE ${Boost_INCLUDE_DIRS})
-    target_link_libraries(instruments PRIVATE ${Boost_LIBRARIES})
-endif ()
 
 # Public include dir for consumers
 target_include_directories(instruments

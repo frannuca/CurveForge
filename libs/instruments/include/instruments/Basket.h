@@ -9,23 +9,24 @@
 #include <utility>
 #include <functional>
 
-namespace curve {
-    namespace instruments {
-        struct Component {
-            double weight;
-            const Instrument &instrument;
-        };
 
-        template<std::size_t N>
-        struct Underlying {
-            std::array<Component, N> instruments;
-        };
+namespace curve::instruments {
+    struct Component {
+        double weight;
+        const Instrument &instrument;
+    };
 
-        template<>
-        struct Underlying<1> {
-            Component x;
-        };
-    } // instruments
-} // curve
+    template<std::size_t N>
+    struct Underlying {
+        std::array<Component, N> instruments;
+    };
+
+    ///specialization for single asset baskets.
+    template<>
+    struct Underlying<1> {
+        Component x;
+    };
+} // instruments
+// curve
 
 #endif //CURVEFORGE_BASKET_H

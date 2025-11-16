@@ -13,7 +13,7 @@ namespace curve {
     public:
         virtual ~ICurveCalibration() = default;
 
-        virtual void set_last_pillar(const std::chrono::days &dt, double value);
+        virtual void set_last_pillar(const time::Date &t, double value);
 
         virtual void set_last_pillar(double value);
 

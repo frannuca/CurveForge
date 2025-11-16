@@ -17,13 +17,18 @@ namespace curve::instruments {
             FIXED, FLOATING
         };
 
-        Leg(const double &notional, std::string currency, time::Date start_date, time::Date end_date,
-            const std::chrono::months &freq_monhts, const time::CalendarBase &calendar,
+        Leg(const double &notional, const std::string &currency, time::Date start_date, time::Date end_date,
+            const std::chrono::months &payment_intervals, const time::CalendarBase &calendar,
             const time::BusinessDayConvention &bdc, const time::DayCountConventionBase &dc, const LegType &leg_type);
 
-        const time::Schedule &cashflows_schedule() const;
+        [[nodiscard]] const time::Schedule &cashflows_schedule() const;
+
+        [[nodiscard]] double notional() const;
+
+        std::string name() const override;
 
     private:
+        double notional_;
         time::Schedule schedule_;
         LegType leg_type_;
     };

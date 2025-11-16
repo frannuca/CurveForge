@@ -2,62 +2,62 @@
 //
 // Created by Francisco Nunez on 14.11.2025.
 //
+#include <utility>
+
 #include "curve/ICurve.h"
 #include "interpolation/linear.h"
 #include "time/daycount.hpp"
 using namespace curve;
 
-ICurve::ICurve(std::vector<Pillar> &&pillars) : pillars_(std::move(pillars)) {
+ICurve::ICurve(const time::Date &cob_date,
+               std::vector<Pillar> &&pillars,
+               std::shared_ptr<time::DayCountConventionBase> convention) : pillars_(std::move(pillars)),
+                                                                           cob_date(cob_date),
+                                                                           dc(std::move(convention)) {
 }
 
-ICurve::ICurve(const std::vector<Pillar> &pillars) : pillars_(pillars) {
+ICurve::ICurve(const time::Date &cob_date, const std::vector<Pillar> &pillars,
+               std::shared_ptr<time::DayCountConventionBase> convention) : cob_date(cob_date), pillars_(pillars),
+                                                                           dc(std::move(convention)) {
 }
 
-double ICurve::D(const std::chrono::days &t) const {
+double ICurve::D(const time::Date &t_in) const {
     if (pillars_.empty()) {
         throw std::runtime_error("No pillars to interpolate.");
     }
+    auto t = t_in;
+    if (t <= pillars_.front().get_time()) t = pillars_.front().get_time();
+    if (t >= pillars_.back().get_time()) t = pillars_.back().get_time();
 
-    if (t <= pillars_.front().get_dt()) return pillars_.front().get_value();
-    if (t >= pillars_.back().get_dt()) return pillars_.back().get_value();
-
-    auto u = std::upper_bound(pillars_.begin(), pillars_.end(), t, [](const std::chrono::days &x, const Pillar &p) {
-        return x < p.get_dt();
+    auto i_upper = std::upper_bound(pillars_.begin(), pillars_.end(), t, [](const time::Date &x, const Pillar &p) {
+        return x < p.get_time();
     });
 
-    auto d = std::lower_bound(pillars_.begin(), pillars_.end(), t, [](const Pillar &p, const std::chrono::days &x) {
-        return p.get_dt() < x;
+    auto i_lower = std::lower_bound(pillars_.begin(), pillars_.end(), t, [](const Pillar &p, const time::Date &x) {
+        return p.get_time() > x;
     });
 
-    auto iu = u - pillars_.begin();
-    auto id = d - pillars_.begin();
+    auto iu = i_upper - pillars_.begin();
+    auto id = i_lower - pillars_.begin();
 
-    double t1 = pillars_[id].get_dt().count();
-    double t2 = pillars_[iu].get_dt().count();
-    double v1 = pillars_[id].get_value();
-    double v2 = pillars_[iu].get_value();
+    const auto t1 = pillars_[id].get_time();
+    const auto t2 = pillars_[iu].get_time();
 
-    auto dt = (t2 - t1);
-    return v1 + (v2 - v1) * (t.count() - t1) / dt;
+    const double v1 = pillars_[id].get_value();
+    const double v2 = pillars_[iu].get_value();
+
+    const double dt = dc->year_fraction(t1, t2);
+    const double dT = dc->year_fraction(t1, t);
+
+    const auto rate = v1 + (v2 - v1) * dT / dt;
+    const auto t_cob = dc->year_fraction(cob_date, t);
+    return std::exp(-rate * t_cob);
 }
 
-double ICurve::F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::months &tenor,
-                 const time::DayCountConventionBase &dc) const {
-    auto t1 = std::chrono::sys_days(t0) + dt1;
-    auto t2 = t1 + tenor;
+double ICurve::F(const time::Date &t1, const time::Date &t2) const {
+    const auto D1 = D(t1);
+    const auto D2 = D(t2);
+    const auto tau = dc->year_fraction(t1, t2);
 
-    std::chrono::days tenorInDays = std::chrono::duration_cast<std::chrono::days>(t2 - t1);
-    return F(t0, dt1, tenorInDays, dc);
-}
-
-double ICurve::F(const time::Date t0, const std::chrono::days &dt1, const std::chrono::days &tenor,
-                 const time::DayCountConventionBase &dc) const {
-    auto D1 = D(dt1);
-    auto D2 = D(dt1 + tenor);
-    if (D1 == D2) return 0.0;
-
-    auto tanchor = std::chrono::sys_days(t0);
-    auto tau = dc.year_fraction(tanchor + dt1, tanchor + dt1 + tenor);
     return (D1 / D2 - 1.0) / tau;
 }
-

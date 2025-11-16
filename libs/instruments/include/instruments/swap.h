@@ -4,16 +4,9 @@
 #include <vector>
 
 #include "Leg.h"
+#include "../../../curve/include/curve/ICurve.h"
 #include "time/calendars.hpp"
 #include "time/date_modifier.hpp"
-
-namespace curve {
-    struct DiscountCurve;
-}
-
-namespace curve::time {
-    enum class FinancialCalendar;
-}
 
 namespace curve::instruments {
     class Swap : public Instrument {
@@ -26,13 +19,14 @@ namespace curve::instruments {
 
         ~Swap() override = default;
 
-        std::string name() const override;
+        [[nodiscard]] std::string name() const override;
 
         const time::Schedule &get_leg1_payment_dates() const;
 
         const time::Schedule &get_leg2_payment_dates() const;
 
-        virtual double par_rate(const DiscountCurve &discount_curve, const DiscountCurve &forward_curve) const = 0;
+        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve,
+                                              const ICurve &forward_curve) const;
 
     private:
         const Leg &leg1_;

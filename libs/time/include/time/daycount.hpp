@@ -25,7 +25,7 @@ namespace curve::time {
         int monhts_fraction(const Date &start, const Date &end) const;
     };
 
-    std::unique_ptr<DayCountConventionBase> create_daycount_convention(DayCountConvention convention);
+    std::shared_ptr<DayCountConventionBase> create_daycount_convention(DayCountConvention convention);
 }; // namespace hft::time
 
 #endif // HFT_TIME_DAYCOUNT_HPP
