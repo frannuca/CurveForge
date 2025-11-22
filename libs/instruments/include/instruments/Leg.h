@@ -25,7 +25,9 @@ namespace curve::instruments {
 
         [[nodiscard]] double notional() const;
 
-        std::string name() const override;
+        [[nodiscard]] std::string name() const override;
+
+        [[nodiscard]] LegType leg_type() const;
 
     private:
         double notional_;

@@ -8,6 +8,7 @@
 #include "time/daycount.hpp"
 #include "curve/FlatRateCurve.h"
 #include "instruments/FixFloatSwap.h"
+#include "instruments/XCSwap.h"
 
 using namespace curve::instruments;
 using namespace curve::time;
@@ -28,24 +29,27 @@ int main() {
     double notional = 1000000.0;
     std::chrono::months freq = std::chrono::months{6};
 
-    Leg leg1(notional, "EUR", start, end, freq, *cal_ptr, BusinessDayConvention::FOLLOWING, *dc, Leg::FIXED);
-    Leg leg2(notional, "EUR", start, end, freq, *cal_ptr, BusinessDayConvention::FOLLOWING, *dc, Leg::FLOATING);
+    Leg leg1(notional, "EUR", start, end, freq, *cal_ptr, BusinessDayConvention::FOLLOWING, *dc, Leg::FLOATING);
+    Leg leg2(notional * 1.2, "USD", start, end, freq, *cal_ptr, BusinessDayConvention::FOLLOWING, *dc, Leg::FLOATING);
 
     // Construct swap
-    FixFloatSwap s(leg1, leg2);
+    XCSwap s(leg1, leg2);
 
     // name() should be currency1/currency2
     assert(s.name() == "swap");
 
     // Test par rate calculation
-    curve::FlatRateCurve discount_curve(cob, 0.05); // 5% constant discount rate
-    curve::FlatRateCurve forward_curve(cob, 0.05); // 5% constant forward rate
+    curve::FlatRateCurve discount_curve_eur(cob, 0.05); // 5% constant discount rate
+    curve::FlatRateCurve forward_curve_eur(cob, 0.05); // 5% constant forward rate
 
-    double rate = s.par_rate(discount_curve, forward_curve);
+    curve::FlatRateCurve discount_curve_usd(cob, 0.03); // 5% constant discount rate
+    curve::FlatRateCurve forward_curve_ud(cob, 0.03); // 5% constant forward rate
+
+    double basis = s.par_rate(discount_curve_eur, forward_curve_eur, discount_curve_usd, forward_curve_ud);
 
     // With flat curves, the par rate should be very close to the forward rate.
     // Using an epsilon for floating point comparison.
-    assert(std::abs(rate - 0.039) < 1e-2);
+    assert(std::abs(basis *1e4- 24) < 1e-1);
 
     std::cout << "SWAP_OK" << std::endl;
     return 0;

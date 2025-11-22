@@ -8,6 +8,10 @@ set(INSTRUMENT_SOURCES
         include/market/marketdata.h
         include/volatility/IVolatility.h
         src/Instrument.cpp
+        src/FixFloatSwap.cpp
+        include/instruments/FixFloatSwap.h
+        src/XCSwap.cpp
+        include/instruments/XCSwap.h
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})

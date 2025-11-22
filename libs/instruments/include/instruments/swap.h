@@ -10,7 +10,7 @@
 
 namespace curve::instruments {
     class Swap : public Instrument {
-    public:
+    protected:
         Swap() = delete;
 
         Swap(const Leg &leg1, const Leg &leg2) : leg1_(leg1), leg2_(leg2),
@@ -19,6 +19,7 @@ namespace curve::instruments {
 
         ~Swap() override = default;
 
+    public:
         [[nodiscard]] std::string name() const override;
 
         const time::Schedule &get_leg1_payment_dates() const;
@@ -26,9 +27,13 @@ namespace curve::instruments {
         const time::Schedule &get_leg2_payment_dates() const;
 
         [[nodiscard]] virtual double par_rate(const ICurve &discount_curve,
-                                              const ICurve &forward_curve) const;
+                                              const ICurve &forward_curve) const = 0;
 
-    private:
+        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve_leg1, const ICurve &forward_curve_leg1,
+                                              const ICurve &discount_curve_leg2,
+                                              const ICurve &forward_curve_leg2) const = 0;
+
+    protected:
         const Leg &leg1_;
         const Leg &leg2_;
     };

@@ -4,6 +4,7 @@ set(CURVE_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Pillar.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ICurveCalibration.cpp
         src/ICurve.cpp
+        src/FlatRateCurve.cpp
 )
 
 add_library(curve ${CURVE_SOURCES})

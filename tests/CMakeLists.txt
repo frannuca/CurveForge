@@ -42,6 +42,22 @@ target_link_libraries(run_swap_tests
 add_test(NAME run_swap_tests COMMAND run_swap_tests)
 set_tests_properties(run_swap_tests PROPERTIES PASS_REGULAR_EXPRESSION "SWAP_OK")
 
+#xcswap test
+add_executable(run_xcswap_tests
+        instruments/test_xcswap.cpp
+)
+
+target_link_libraries(run_xcswap_tests
+        PRIVATE
+        CurveForge::instruments
+        CurveForge::curve
+        CurveForge::time
+)
+
+add_test(NAME run_xcswap_tests COMMAND run_xcswap_tests)
+set_tests_properties(run_xcswap_tests PROPERTIES PASS_REGULAR_EXPRESSION "SWAP_OK")
+
+
 # time  test
 add_executable(run_calendar_tests
         time/test_calendars.cpp

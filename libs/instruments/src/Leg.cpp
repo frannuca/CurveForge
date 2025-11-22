@@ -28,3 +28,7 @@ double Leg::notional() const {
 std::string Leg::name() const {
     return "Leg";
 }
+
+Leg::LegType Leg::leg_type() const {
+    return leg_type_;
+}
