@@ -12,14 +12,7 @@ namespace curve::instruments {
     public:
         XCSwap(const Leg &base_ccy_leg, const Leg &foreign_ccy_leg);
 
-        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve,
-                                              const ICurve &forward_curve) const override {
-            throw std::runtime_error("Not implemented");
-        };
-
-        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve_leg1, const ICurve &forward_curve_leg1,
-                                              const ICurve &discount_curve_leg2,
-                                              const ICurve &forward_curve_leg2) const override;
+        [[nodiscard]] double fxSpot() const;
 
     private:
         double fxSpot_;

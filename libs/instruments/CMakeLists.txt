@@ -2,19 +2,14 @@ cmake_minimum_required(VERSION 3.21)
 
 set(INSTRUMENT_SOURCES
         src/swap.cpp
-        include/instruments/Basket.h
-        include/instruments/Leg.h
         src/Leg.cpp
-        include/market/marketdata.h
-        include/volatility/IVolatility.h
         src/Instrument.cpp
         src/FixFloatSwap.cpp
-        include/instruments/FixFloatSwap.h
         src/XCSwap.cpp
-        include/instruments/XCSwap.h
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})
+add_library(CurveForge::instruments ALIAS instruments)
 
 find_package(Boost REQUIRED COMPONENTS uuid)
 
@@ -28,7 +23,6 @@ endif ()
 # Link internal project dependencies
 target_link_libraries(instruments PUBLIC CurveForge::time)
 target_link_libraries(instruments PUBLIC CurveForge::interpolation)
-target_link_libraries(instruments PUBLIC CurveForge::curve)
 
 
 # Public include dir for consumers
@@ -38,7 +32,6 @@ target_include_directories(instruments
         $<INSTALL_INTERFACE:include>
 )
 
-add_library(CurveForge::instruments ALIAS instruments)
 
 set_target_properties(instruments PROPERTIES
         OUTPUT_NAME "instruments"

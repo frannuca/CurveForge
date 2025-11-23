@@ -22,16 +22,12 @@ namespace curve::instruments {
     public:
         [[nodiscard]] std::string name() const override;
 
-        const time::Schedule &get_leg1_payment_dates() const;
+        [[nodiscard]] const time::Schedule &get_leg1_payment_dates() const;
 
-        const time::Schedule &get_leg2_payment_dates() const;
+        [[nodiscard]] const time::Schedule &get_leg2_payment_dates() const;
 
-        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve,
-                                              const ICurve &forward_curve) const = 0;
-
-        [[nodiscard]] virtual double par_rate(const ICurve &discount_curve_leg1, const ICurve &forward_curve_leg1,
-                                              const ICurve &discount_curve_leg2,
-                                              const ICurve &forward_curve_leg2) const = 0;
+        [[nodiscard]] const Leg &leg1() const { return leg1_; }
+        [[nodiscard]] const Leg &leg2() const { return leg2_; }
 
     protected:
         const Leg &leg1_;

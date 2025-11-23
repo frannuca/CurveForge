@@ -24,7 +24,9 @@ namespace curve {
                 accruals.push_back({current_date, modified_end_date, accrued});
                 modified_end_date = current_date;
             }
-
+            std::sort(accruals.begin(), accruals.end(), [](const AccruedPeriod &a, const AccruedPeriod &b) {
+                return a.start_date < b.start_date;
+            });
             return {accruals, freq_monhts, bdc, dc, calendar};
         }
     } // time

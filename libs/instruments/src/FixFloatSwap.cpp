@@ -2,7 +2,7 @@
 // Created by Francisco Nunez on 22.11.2025.
 //
 
-#include "../include/instruments/FixFloatSwap.h"
+#include "instruments/FixFloatSwap.h"
 
 curve::instruments::FixFloatSwap::FixFloatSwap(const Leg &fixed_leg, const Leg &floating_leg) : Swap(
     fixed_leg, floating_leg) {
@@ -14,6 +14,7 @@ curve::instruments::FixFloatSwap::FixFloatSwap(const Leg &fixed_leg, const Leg &
     }
 }
 
+/*
 double curve::instruments::FixFloatSwap::par_rate(const ICurve &discount_curve, const ICurve &forward_curve) const {
     const auto &leg1_schedule = leg1_.cashflows_schedule();
     const auto &leg2_schedule = leg2_.cashflows_schedule();
@@ -41,3 +42,4 @@ double curve::instruments::FixFloatSwap::par_rate(const ICurve &discount_curve, 
 
     return notional2 * pv_leg2 / (notional1 * pv_leg1);
 }
+*/

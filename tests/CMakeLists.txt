@@ -71,6 +71,22 @@ target_link_libraries(run_calendar_tests
 add_test(NAME run_calendar_tests COMMAND run_calendar_tests)
 set_tests_properties(run_calendar_tests PROPERTIES PASS_REGULAR_EXPRESSION "CALENDAR_OK")
 
+# pricing  test
+add_executable(run_pricing_tests
+        pricing/test_pricing.cpp
+)
+
+target_link_libraries(run_pricing_tests
+        PRIVATE
+        CurveForge::time
+        CurveForge::instruments
+        CurveForge::curve
+        CurveForge::pricing
+)
+
+add_test(NAME run_pricing_tests COMMAND run_pricing_tests)
+set_tests_properties(run_pricing_tests PROPERTIES PASS_REGULAR_EXPRESSION "PRICING_OK")
+
 
 # Date modifier tests
 add_executable(run_date_modifier_tests

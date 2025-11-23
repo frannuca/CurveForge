@@ -33,7 +33,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(CURVEFORGE_BUILD_TESTS "Build unit tests" ON)
 option(CURVEFORGE_BUILD_APPS "Build applications" ON)
-option(CURVEFORGE_BUILD_SHARED "Build shared libs" OFF)
+option(CURVEFORGE_BUILD_SHARED "Build shared libs" ON)
 option(BOOST_BUILD_IF_MISSING "Build boost libs" ON)
 
 
@@ -44,7 +44,7 @@ endif ()
 
 add_subdirectory(libs/interpolation)
 add_subdirectory(libs/curve)
-#add_subdirectory(libs/pricing)
+add_subdirectory(libs/pricing)
 add_subdirectory(libs/time)
 add_subdirectory(libs/instruments)
 
