@@ -5,6 +5,7 @@
 #include "pricing/XCSwapPricer.h"
 #include "instruments/XCSwap.h"
 
+
 namespace curve::pricing {
     double XCSwapPricer::pv(const instruments::Instrument &instrument,
                             std::shared_ptr<market::MarketData> md) const {
@@ -14,6 +15,10 @@ namespace curve::pricing {
     Greeks XCSwapPricer::compute(const instruments::Instrument &instrument,
                                  std::shared_ptr<market::MarketData> md) const {
         throw std::runtime_error("Not implemented.");
+    }
+
+    bool XCSwapPricer::CanPriceInstrument(const instruments::Instrument &p) {
+        return dynamic_cast<const instruments::XCSwap *>(&p) != nullptr;
     }
 
     double XCSwapPricer::price(const instruments::Instrument &instrument,

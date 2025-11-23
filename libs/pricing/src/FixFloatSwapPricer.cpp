@@ -3,6 +3,8 @@
 //
 #include "pricing/FixFloatSwapPricer.h"
 #include "instruments/FixFloatSwap.h"
+#include <typeinfo>
+
 
 namespace curve::pricing {
     using namespace curve::instruments;
@@ -16,6 +18,11 @@ namespace curve::pricing {
                                        std::shared_ptr<market::MarketData> md) const {
         throw std::runtime_error("Not implemented.");
     }
+
+    bool FixFloatSwapPricer::CanPriceInstrument(const Instrument &p) {
+        return dynamic_cast<const FixFloatSwap *>(&p) != nullptr;
+    }
+
 
     double FixFloatSwapPricer::price(const Instrument &instrument,
                                      std::shared_ptr<market::MarketData> md) const {

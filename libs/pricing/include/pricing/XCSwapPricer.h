@@ -8,6 +8,10 @@
 #include "instruments/Instrument.h"
 #include "market/marketdata.h"
 
+namespace curve::instruments {
+    class XCSwap;
+}
+
 namespace curve::pricing {
     class XCSwapPricer : public IPricer {
     public:
@@ -19,6 +23,11 @@ namespace curve::pricing {
 
         [[nodiscard]] virtual Greeks compute(const instruments::Instrument &instrument,
                                              std::shared_ptr<market::MarketData> md) const override;
+
+        [[nodiscard]] bool CanPriceInstrument(const instruments::Instrument &p) override;
+
+    protected:
+        static bool registered;
     };
 }
 

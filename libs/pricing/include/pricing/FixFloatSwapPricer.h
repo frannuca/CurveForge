@@ -11,6 +11,9 @@
 namespace curve::pricing {
     class FixFloatSwapPricer : public IPricer {
     public:
+        FixFloatSwapPricer() {
+        }
+
         [[nodiscard]] virtual double pv(const instruments::Instrument &instrument,
                                         std::shared_ptr<::curve::market::MarketData> md) const override;
 
@@ -19,6 +22,11 @@ namespace curve::pricing {
 
         [[nodiscard]] virtual curve::pricing::Greeks
         compute(const instruments::Instrument &instrument, std::shared_ptr<market::MarketData> md) const override;
+
+        [[nodiscard]] bool CanPriceInstrument(const instruments::Instrument &p) override;
+
+    protected:
+        static bool registered;
     };
 }
 

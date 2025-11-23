@@ -13,6 +13,8 @@ set(PRICING_SOURCES
         src/FixFloatSwapPricer.cpp
         src/XCSwapPricer.cpp
         include/pricing/XCSwapPricer.h
+        src/GreekCalculator.cpp
+        include/pricing/GreekCalculator.h
 )
 add_library(pricing ${PRICING_SOURCES})
 

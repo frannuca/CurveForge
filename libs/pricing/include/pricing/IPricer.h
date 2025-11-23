@@ -22,6 +22,8 @@ namespace curve::pricing {
 
         [[nodiscard]] virtual Greeks compute(const instruments::Instrument &instrument,
                                              std::shared_ptr<market::MarketData> md) const = 0;
+
+        virtual bool CanPriceInstrument(const instruments::Instrument &p) =0;
     };
 }
 
