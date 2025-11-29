@@ -49,6 +49,7 @@ add_subdirectory(libs/curve)
 add_subdirectory(libs/pricing)
 add_subdirectory(libs/time)
 add_subdirectory(libs/instruments)
+add_subdirectory(libs/volatility)
 
 
 if (CURVEFORGE_BUILD_APPS)

@@ -99,7 +99,7 @@ foreach (XSD_ROOT ${XSD_ROOT_SCHEMAS})
 endforeach ()
 
 # 8) Static library from ALL generated sources
-add_library(datacontracts STATIC ${GENERATED_SOURCES} ${GENERATED_HEADERS})
+add_library(datacontracts SHARED ${GENERATED_SOURCES} ${GENERATED_HEADERS})
 add_library(CurveForge::datacontracts ALIAS datacontracts)
 
 target_link_libraries(datacontracts

@@ -7,7 +7,7 @@
     <!-- For same-namespace / chameleon schemas: use xs:include, not xs:import -->
     <xs:include schemaLocation="Instrument.xsd"/>
 
-    <xs:complexType name="XForward">
+    <xs:complexType name="Forward">
         <xs:complexContent>
             <xs:extension base="Instrument">
                 <xs:sequence>
@@ -19,6 +19,6 @@
         </xs:complexContent>
     </xs:complexType>
 
-    <xs:element name="Forward" type="XForward"/>
+    <xs:element name="Forward" type="Forward"/>
 
 </xs:schema>

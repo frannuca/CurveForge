@@ -5,6 +5,7 @@ set(CURVE_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ICurveCalibration.cpp
         src/ICurve.cpp
         src/FlatRateCurve.cpp
+        ../volatility/include/volatility/VolatilityFactory.h
 )
 
 add_library(curve ${CURVE_SOURCES})

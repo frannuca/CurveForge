@@ -127,3 +127,19 @@ target_link_libraries(run_datacontracts_tests
 
 add_test(NAME run_datacontracts_tests COMMAND run_datacontracts_tests)
 set_tests_properties(run_datacontracts_tests PROPERTIES PASS_REGULAR_EXPRESSION "XInstruments_OK")
+
+
+# volatility contracts tests
+add_executable(run_volatility_tests
+        volatility/test_vol_surface_calibration.cpp
+)
+
+target_link_libraries(run_volatility_tests
+        PRIVATE
+        CurveForge::volatility
+        CurveForge::interpolation
+        CurveForge::datacontracts
+)
+
+add_test(NAME run_volatility_tests COMMAND run_volatility_tests)
+set_tests_properties(run_volatility_tests PROPERTIES PASS_REGULAR_EXPRESSION "VOL_OK")
