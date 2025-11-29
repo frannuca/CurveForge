@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/instruments"
+           elementFormDefault="qualified">
+
+    <!-- For same-namespace / chameleon schemas: use xs:include, not xs:import -->
+    <xs:include schemaLocation="Instrument.xsd"/>
+
+    <xs:complexType name="XForward">
+        <xs:complexContent>
+            <xs:extension base="Instrument">
+                <xs:sequence>
+                    <xs:element name="settlementDate" type="xs:date"/>
+                    <xs:element name="underlying" type="xs:string"/>
+                    <xs:element name="notional" type="xs:decimal"/>
+                </xs:sequence>
+            </xs:extension>
+        </xs:complexContent>
+    </xs:complexType>
+
+    <xs:element name="Forward" type="XForward"/>
+
+</xs:schema>

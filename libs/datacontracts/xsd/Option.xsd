@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:com="http://curveforge.com/commons"
+           xmlns="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/instruments"
+           elementFormDefault="qualified">
+
+    <!-- For same-namespace / chameleon schemas: use xs:include, not xs:import -->
+    <xs:include schemaLocation="Instrument.xsd"/>
+    <xs:import namespace="http://curveforge.com/commons"
+               schemaLocation="commons.xsd"/>
+
+    <!-- Enum type -->
+    <xs:simpleType name="OptionType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="CALL"/>
+            <xs:enumeration value="PUT"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:simpleType name="BarrierType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="UP_IN"/>
+            <xs:enumeration value="UP_OUT"/>
+            <xs:enumeration value="DOWN_IN"/>
+            <xs:enumeration value="DOWN_OUT"/>
+            <xs:enumeration value="ONE_TOUCH"/>
+            <xs:enumeration value="NO_TOUCH"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:simpleType name="DoubleBarrierType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="DOUBLE_KNOCK_IN"/>
+            <xs:enumeration value="DOUBLE_KNOCK_OUT"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:complexType name="SingleBarrier">
+        <xs:sequence>
+            <xs:element name="barrierType" type="BarrierType"/>
+            <xs:element name="barrierLevel" type="xs:decimal"/>
+            <xs:element name="observationInterval" type="Interval" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="DoubleBarrier">
+        <xs:sequence>
+            <xs:element name="barrierType" type="DoubleBarrierType"/>
+            <xs:element name="barrierLevel" type="xs:double" minOccurs="2" maxOccurs="2"/>
+            <xs:element name="observationInterval" type="Interval" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+
+    <xs:complexType name="Interval">
+        <xs:sequence>
+            <xs:element name="startDate" type="xs:date"/>
+            <xs:element name="endDate" type="xs:date"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:simpleType name="ExerciseStyle">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="EUROPEAN"/>
+            <xs:enumeration value="AMERICAN"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:complexType name="Option">
+        <xs:complexContent>
+            <!-- XInstrument comes from Instrument.xsd (same namespace) -->
+            <xs:extension base="Instrument">
+                <xs:sequence>
+                    <!-- This reference is now correct: same schema / namespace -->
+                    <xs:element name="optionType" type="OptionType"/>
+                    <xs:element name="strike" type="xs:decimal"/>
+                    <xs:element name="expiry" type="xs:date"/>
+                    <xs:element name="underlying" type="com:Basket"/>
+                    <xs:element name="notional" type="xs:decimal" minOccurs="0"/>
+                    <xs:element name="exerciseStyle" type="ExerciseStyle" minOccurs="0"/>
+                    <xs:choice minOccurs="0">
+                        <xs:element name="barrier" type="SingleBarrier"/>
+                        <xs:element name="doubleBarrier" type="DoubleBarrier"/>
+                    </xs:choice>
+                    <xs:element name="bermudianPeriod" type="Interval" minOccurs="0"/>
+                </xs:sequence>
+            </xs:extension>
+        </xs:complexContent>
+    </xs:complexType>
+
+    <xs:element name="Option" type="Option"/>
+
+</xs:schema>

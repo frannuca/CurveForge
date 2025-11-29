@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:yc="http://curveforge.com/yield"
+           xmlns:vol="http://curveforge.com/vol"
+           xmlns:q="http://curveforge.com/quotes"
+           xmlns="http://curveforge.com/marketdata"
+           targetNamespace="http://curveforge.com/marketdata"
+           elementFormDefault="qualified">
+
+    <!-- =========================================================
+         Imports: yield curves, vol surfaces, quotes
+         (schemaLocation paths are relative; adjust to your layout)
+         ========================================================= -->
+    <xs:import namespace="http://curveforge.com/yield"
+               schemaLocation="yield.xsd"/>
+    <xs:import namespace="http://curveforge.com/vol"
+               schemaLocation="vol.xsd"/>
+    <xs:import namespace="http://curveforge.com/quotes"
+               schemaLocation="quotes.xsd"/>
+    <xs:import namespace="http://curveforge.com/commons"
+               schemaLocation="commons.xsd"/>
+
+    <!-- =========================================================
+         Market data snapshot header
+         ========================================================= -->
+    <xs:complexType name="MarketDataHeader">
+        <xs:sequence>
+            <!-- Valuation date -->
+            <xs:element name="asOf" type="xs:date"/>
+
+            <!-- Optional precise snapshot time -->
+            <xs:element name="snapshotTime" type="xs:dateTime" minOccurs="0"/>
+
+            <!-- Optional scenario name: LIVE, EOD, STRESS_XYZ, etc. -->
+            <xs:element name="scenarioName" type="xs:string" minOccurs="0"/>
+
+            <!-- Optional overall data source: "BBG", "REUTERS", "INTERNAL" -->
+            <xs:element name="source" type="xs:string" minOccurs="0"/>
+
+            <!-- Optional identifier for this snapshot (UUID, batch ID, etc.) -->
+            <xs:element name="snapshotId" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Market data snapshot = header + curves + vols + quotes
+         ========================================================= -->
+    <xs:complexType name="MarketDataSnapshot">
+        <xs:sequence>
+            <xs:element name="header" type="MarketDataHeader"/>
+
+            <!-- Yield curves (0..N) -->
+            <xs:element name="yieldCurves" minOccurs="0">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="yieldCurve"
+                                    type="yc:YieldCurve"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+
+            <!-- Vol surfaces (0..N) -->
+            <xs:element name="volSurfaces" minOccurs="0">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="volSurface"
+                                    type="vol:VolSurface"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+
+            <!-- Instrument quotes (0..N quote sets, e.g. per feed / market) -->
+            <xs:element name="quoteSets" minOccurs="0">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="quoteSet"
+                                    type="q:InstrumentQuoteSet"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Top-level element -->
+    <xs:element name="MarketDataSnapshot" type="MarketDataSnapshot"/>
+
+</xs:schema>

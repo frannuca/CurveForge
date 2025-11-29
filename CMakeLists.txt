@@ -1,4 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
+# Must be set before project() to take effect globally
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.6" CACHE STRING "Minimum OS X deployment version" FORCE)
 
 
 # cmake
@@ -14,7 +16,7 @@ endif ()
 
 # ... then your usual cmake_minimum_required / project() / targets ...
 # Example: find_package will now pick packages declared in `vcpkg.json`
-# find_package(Boost REQUIRED COMPONENTS uuid)
+#find_package(Boost REQUIRED COMPONENTS uuid)
 
 # Set policy to use new Boost CMake config instead of FindBoost module
 if (POLICY CMP0167)
@@ -41,7 +43,7 @@ if (CURVEFORGE_BUILD_SHARED)
     set(BUILD_SHARED_LIBS ON)
 endif ()
 
-
+add_subdirectory(libs/datacontracts)
 add_subdirectory(libs/interpolation)
 add_subdirectory(libs/curve)
 add_subdirectory(libs/pricing)

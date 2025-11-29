@@ -115,3 +115,15 @@ target_link_libraries(run_test_scheduler
 add_test(NAME run_test_scheduler COMMAND run_test_scheduler)
 set_tests_properties(run_test_scheduler PROPERTIES PASS_REGULAR_EXPRESSION "CALENDAR_OK")
 
+# data contracts tests
+add_executable(run_datacontracts_tests
+        datacontracts/datacontracts_tests.cpp
+)
+
+target_link_libraries(run_datacontracts_tests
+        PRIVATE
+        CurveForge::datacontracts
+)
+
+add_test(NAME run_datacontracts_tests COMMAND run_datacontracts_tests)
+set_tests_properties(run_datacontracts_tests PROPERTIES PASS_REGULAR_EXPRESSION "XInstruments_OK")

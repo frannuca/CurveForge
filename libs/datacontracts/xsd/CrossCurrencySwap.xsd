@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/instruments"
+           elementFormDefault="qualified">
+
+    <!-- For same-namespace / chameleon schemas: use xs:include, not xs:import -->
+    <xs:include schemaLocation="Instrument.xsd"/>
+
+    <xs:complexType name="XCrossCurrencySwap">
+        <xs:complexContent>
+            <xs:extension base="Instrument">
+                <xs:sequence>
+                    <xs:element name="domesticCurrency" type="xs:string"/>
+                    <xs:element name="domesticNotional" type="xs:decimal"/>
+                    <xs:element name="domesticFloatIndex" type="xs:string" minOccurs="0"/>
+                    <xs:element name="domesticFloatTenor" type="xs:string" minOccurs="0"/>
+                    <xs:element name="foreignCurrency" type="xs:string"/>
+                    <xs:element name="foreignNotional" type="xs:decimal"/>
+                    <xs:element name="foreignFloatIndex" type="xs:string" minOccurs="0"/>
+                    <xs:element name="foreignFloatTenor" type="xs:string" minOccurs="0"/>
+                    <xs:element name="exchangeNotionalAtMaturity" type="xs:boolean" minOccurs="0"/>
+                </xs:sequence>
+            </xs:extension>
+        </xs:complexContent>
+    </xs:complexType>
+
+    <xs:element name="CrossCurrencySwap" type="XCrossCurrencySwap"/>
+
+</xs:schema>

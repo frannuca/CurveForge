@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/vol"
+           targetNamespace="http://curveforge.com/vol"
+           elementFormDefault="qualified">
+
+    <!-- =========================================================
+         Basic enums
+         ========================================================= -->
+
+    <!-- How vol is quoted -->
+    <xs:simpleType name="VolQuoteType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="BLACK"/>           <!-- lognormal implied vol -->
+            <xs:enumeration value="NORMAL"/>          <!-- Bachelier / normal vol -->
+            <xs:enumeration value="LOGNORMAL_VEGA"/>  <!-- optional, if you ever use it -->
+            <xs:enumeration value="VARIANCE"/>        <!-- variance quote (sigma^2 * T) -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- How strike dimension is parametrized -->
+    <xs:simpleType name="StrikeDimensionType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="ABSOLUTE_STRIKE"/>  <!-- K -->
+            <xs:enumeration value="MONEYNESS"/>        <!-- e.g. K/F or ln(K/F) -->
+            <xs:enumeration value="DELTA"/>            <!-- 10D put, 25D call etc. -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Interpolation mode (for metadata only) -->
+    <xs:simpleType name="InterpolationType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="LINEAR"/>           <!-- linear in given dimension -->
+            <xs:enumeration value="CUBIC_SPLINE"/>
+            <xs:enumeration value="BILINEAR"/>
+            <xs:enumeration value="BICUBIC"/>
+            <xs:enumeration value="NONE"/>             <!-- just discrete quotes -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Expiry encoding: either tenor-style or calendar date.
+         For simplicity here we use ISO-8601 tenor strings (e.g. "1M", "6M", "1Y"). -->
+    <xs:simpleType name="ExpiryTenor">
+        <xs:restriction base="xs:string">
+            <xs:pattern value="[0-9]+[YMD]"/> <!-- accepts formats like 1M, 1D, 1Y, 5M -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- =========================================================
+         Header for a vol surface
+         ========================================================= -->
+
+    <xs:complexType name="VolSurfaceHeader">
+        <xs:sequence>
+            <!-- Underlying identifier: e.g. "EURUSD", "SPX", "EUR_SWAP_10Y" -->
+            <xs:element name="underlyingId" type="xs:string"/>
+
+            <!-- As-of date for the surface -->
+            <xs:element name="asOf" type="xs:date"/>
+
+            <!-- Quoting convention -->
+            <xs:element name="quoteType" type="VolQuoteType"/>
+
+            <!-- Strike dimension representation -->
+            <xs:element name="strikeDimension" type="StrikeDimensionType"/>
+
+            <!-- What unit the strikeCoordinates below are in (optional text) -->
+            <xs:element name="strikeUnit" type="xs:string" minOccurs="0"/>
+
+            <!-- Interpolation hint (for consumers) -->
+            <xs:element name="expiryInterpolation" type="InterpolationType" minOccurs="0"/>
+            <xs:element name="strikeInterpolation" type="InterpolationType" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Single surface point (node)
+         ========================================================= -->
+
+    <xs:complexType name="VolSurfacePoint">
+        <xs:sequence>
+            <!-- Expiry as tenor (e.g. "1M", "6M", "1Y") or you could switch this to xs:date -->
+            <xs:element name="expiry" type="ExpiryTenor"/>
+
+            <!-- Strike / moneyness / delta, interpreted according to header.strikeDimension -->
+            <xs:element name="strikeCoordinate" type="xs:double"/>
+
+            <!-- The volatility value itself (in decimals, e.g. 0.25 for 25%) -->
+            <xs:element name="volatility" type="xs:double"/>
+
+            <!-- Optional forward / spot at node, useful for moneyness/Delta conversions -->
+            <xs:element name="forward" type="xs:double" minOccurs="0"/>
+
+            <!-- Optional: total variance, if you want to store it explicitly -->
+            <xs:element name="totalVariance" type="xs:double" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Vol surface = header + list of points
+         ========================================================= -->
+
+    <xs:complexType name="VolSurface">
+        <xs:sequence>
+            <xs:element name="header" type="VolSurfaceHeader"/>
+
+            <!-- Flat list of nodes -->
+            <xs:element name="points" minOccurs="1">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="point"
+                                    type="VolSurfacePoint"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Top-level element -->
+    <xs:element name="VolSurface" type="VolSurface"/>
+
+</xs:schema>

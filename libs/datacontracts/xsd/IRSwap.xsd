@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:com="http://curveforge.com/commons"
+           xmlns="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/instruments"
+           elementFormDefault="qualified">
+
+    <!-- For same-namespace / chameleon schemas: use xs:include, not xs:import -->
+    <xs:include schemaLocation="Instrument.xsd"/>
+    <xs:import
+            namespace="http://curveforge.com/commons"
+            schemaLocation="commons.xsd"/>
+
+    <xs:complexType name="IRSwap">
+        <xs:complexContent>
+            <xs:extension base="Instrument">
+                <xs:sequence>
+                    <xs:element name="notional" type="xs:decimal"/>
+                    <xs:element name="fixedRate" type="xs:decimal"/>
+                    <xs:element name="floatIndex" type="xs:string"/>
+                    <xs:element name="floatTenor" type="xs:string"/>
+                    <xs:element name="payFixed" type="xs:boolean"/>
+                    <xs:element name="currency" type="xs:string"/>
+                    <xs:element name="cashflows" type="com:CashFlows"/>
+                </xs:sequence>
+            </xs:extension>
+        </xs:complexContent>
+    </xs:complexType>
+
+    <xs:element name="IRSwap" type="IRSwap"/>
+
+</xs:schema>

@@ -9,7 +9,6 @@ set(INSTRUMENT_SOURCES
 )
 
 add_library(instruments ${INSTRUMENT_SOURCES})
-add_library(CurveForge::instruments ALIAS instruments)
 
 find_package(Boost REQUIRED COMPONENTS uuid)
 
@@ -19,6 +18,9 @@ if (Boost_FOUND)
 else ()
     message(FATAL_ERROR "Boost::uuid not found")
 endif ()
+
+
+add_library(CurveForge::instruments ALIAS instruments)
 
 # Link internal project dependencies
 target_link_libraries(instruments PUBLIC CurveForge::time)

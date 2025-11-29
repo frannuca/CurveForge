@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/instruments"
+           elementFormDefault="qualified">
+
+
+    <xs:complexType name="Instrument">
+        <xs:sequence>
+            <xs:element name="name" type="xs:string"/>
+            <xs:element name="assetClass" type="xs:string"/>
+            <xs:element name="id" type="xs:string"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Global element for base type -->
+    <xs:element name="XInstrument" type="Instrument"/>
+
+</xs:schema>

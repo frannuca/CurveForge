@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/commons"
+           targetNamespace="http://curveforge.com/commons"
+           elementFormDefault="qualified">
+
+    <xs:complexType name="Underlying">
+        <xs:sequence>
+            <xs:element name="id" type="xs:string"/>
+            <xs:element name="instrumentId" type="xs:string"/>
+            <xs:element name="weight" type="xs:double"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:simpleType name="Frequency">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="DAILY"/>
+            <xs:enumeration value="WEEKLY"/>
+            <xs:enumeration value="MONTHLY"/>
+            <xs:enumeration value="QUARTERLY"/>
+            <xs:enumeration value="SEMIANNUAL"/>
+            <xs:enumeration value="ANNUAL"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <xs:complexType name="ScheduleDefinition">
+        <xs:sequence>
+            <xs:element name="startDate" type="xs:date"/>
+            <xs:element name="endDate" type="xs:date"/>
+            <xs:element name="frequency" type="Frequency"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="Pillar">
+        <xs:sequence>
+            <xs:element name="date" type="xs:date"/>
+            <xs:element name="value" type="xs:double"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="Pillars">
+        <xs:sequence>
+            <xs:element name="pillar" type="Pillar" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="Basket">
+        <xs:sequence>
+            <xs:element name="underlying" type="Underlying" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="CashFlow">
+        <xs:sequence>
+            <xs:element name="date" type="xs:date"/>
+            <xs:element name="amount" type="xs:double"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <xs:complexType name="CashFlows">
+        <xs:sequence>
+            <xs:element name="cashflow" type="CashFlow" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+
+</xs:schema>

@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/yield"
+           targetNamespace="http://curveforge.com/yield"
+           elementFormDefault="qualified">
+
+    <!-- =========================================================
+         Basic enums
+         ========================================================= -->
+
+    <!-- Type of curve this is -->
+    <xs:simpleType name="YieldCurveType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="ZERO_RATE"/>      <!-- curveValue = zero rate -->
+            <xs:enumeration value="DISCOUNT_FACTOR"/> <!-- curveValue = DF -->
+            <xs:enumeration value="FORWARD_RATE"/>   <!-- curveValue = forward rate -->
+            <xs:enumeration value="PAR_SWAP_RATE"/>  <!-- curveValue = par swap rate -->
+            <xs:enumeration value="OIS_ZERO"/>       <!-- OIS zero curve -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Day-count convention -->
+    <xs:simpleType name="DayCountConvention">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="ACT_365F"/>
+            <xs:enumeration value="ACT_360"/>
+            <xs:enumeration value="ACT_ACT_ISDA"/>
+            <xs:enumeration value="ACT_ACT_ICMA"/>
+            <xs:enumeration value="THIRTY_360"/>
+            <xs:enumeration value="THIRTYE_360"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Compounding convention -->
+    <xs:simpleType name="CompoundingConvention">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="SIMPLE"/>         <!-- linear -->
+            <xs:enumeration value="ANNUAL"/>
+            <xs:enumeration value="SEMI_ANNUAL"/>
+            <xs:enumeration value="QUARTERLY"/>
+            <xs:enumeration value="CONTINUOUS"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Interpolation hint -->
+    <xs:simpleType name="InterpolationType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="LINEAR_ZERO"/>     <!-- linear in zero rate -->
+            <xs:enumeration value="LINEAR_DISCOUNT"/> <!-- linear in DF -->
+            <xs:enumeration value="LOG_LINEAR_DISCOUNT"/>
+            <xs:enumeration value="CUBIC_SPLINE"/>
+            <xs:enumeration value="NONE"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Tenor encoding (e.g. "1D", "1W", "1M", "3M", "1Y", "5Y") -->
+    <xs:simpleType name="Tenor">
+        <xs:restriction base="xs:string">
+            <xs:pattern value="[0-9]+[YMD]"/> <!-- accepts formats like 1M, 1D, 1Y, 5M -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- =========================================================
+         Curve header
+         ========================================================= -->
+
+    <xs:complexType name="YieldCurveHeader">
+        <xs:sequence>
+            <!-- Identifier: e.g. "EUR_ESTR_DISCOUNT", "USD_LIBOR3M_ZERO" -->
+            <xs:element name="curveId" type="xs:string"/>
+
+            <!-- Currency code, e.g. "EUR", "USD" -->
+            <xs:element name="currency" type="xs:string"/>
+
+            <!-- As-of date for the curve -->
+            <xs:element name="asOf" type="xs:date"/>
+
+            <!-- Curve semantics and conventions -->
+            <xs:element name="curveType" type="YieldCurveType"/>
+            <xs:element name="dayCount" type="DayCountConvention"/>
+            <xs:element name="compounding" type="CompoundingConvention"/>
+
+            <!-- Interpolation hints (optional) -->
+            <xs:element name="interpolation" type="InterpolationType" minOccurs="0"/>
+
+            <!-- Optional: reference index, e.g. "EURIBOR3M", "SOFR" -->
+            <xs:element name="referenceIndex" type="xs:string" minOccurs="0"/>
+
+            <!-- Optional: calendar / business day convention names as free text -->
+            <xs:element name="calendarName" type="xs:string" minOccurs="0"/>
+            <xs:element name="businessDayConvention" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Single curve node
+         ========================================================= -->
+
+    <xs:complexType name="YieldCurvePoint">
+        <xs:sequence>
+            <!-- Maturity tenor ("1M", "3M", "5Y", etc.) -->
+            <xs:element name="tenor" type="Tenor"/>
+
+            <!-- Optional actual maturity date -->
+            <xs:element name="maturityDate" type="xs:date" minOccurs="0"/>
+
+            <!-- Curve value at this node:
+                 - if curveType = ZERO_RATE,      this is the zero rate (decimal, e.g. 0.025)
+                 - if curveType = DISCOUNT_FACTOR, this is DF
+                 - if curveType = FORWARD_RATE,    this is forward rate, etc.
+            -->
+            <xs:element name="curveValue" type="xs:double"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Yield curve = header + list of points
+         ========================================================= -->
+
+    <xs:complexType name="YieldCurve">
+        <xs:sequence>
+            <xs:element name="header" type="YieldCurveHeader"/>
+
+            <xs:element name="points">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="point"
+                                    type="YieldCurvePoint"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Top-level element -->
+    <xs:element name="YieldCurve" type="YieldCurve"/>
+
+</xs:schema>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns:md="http://curveforge.com/marketdata"
+           xmlns:instrument="http://curveforge.com/instruments"
+           targetNamespace="http://curveforge.com/portfolio"
+           elementFormDefault="qualified">
+    <!-- Import schemas that have their own namespaces -->
+    <xs:import namespace="http://curveforge.com/instruments" schemaLocation="Instrument.xsd"/>
+    <xs:import namespace="http://curveforge.com/marketdata" schemaLocation="marketdata.xsd"/>
+
+    <xs:complexType name="Portfolio">
+        <xs:sequence>
+            <xs:element name="name" type="xs:string"/>
+            <xs:element name="key" type="xs:string"/>
+            <xs:element name="Instrument" type="instrument:Instrument" maxOccurs="unbounded"/>
+            <xs:element name="MarketData" type="md:MarketDataSnapshot" minOccurs="0" maxOccurs="unbounded"/>
+        </xs:sequence>
+    </xs:complexType>
+</xs:schema>

@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           xmlns="http://curveforge.com/quotes"
+           targetNamespace="http://curveforge.com/quotes"
+           elementFormDefault="qualified">
+
+    <!-- =========================================================
+         Enums
+         ========================================================= -->
+
+    <!-- Type of numeric value -->
+    <xs:simpleType name="QuoteValueType">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="PRICE"/>       <!-- clean price / level -->
+            <xs:enumeration value="YIELD"/>       <!-- yield, decimal (0.025 = 2.5%) -->
+            <xs:enumeration value="SPREAD_BP"/>   <!-- spread in basis points (ASW, Z-spread, etc.) -->
+            <xs:enumeration value="RATE"/>        <!-- generic rate, decimal -->
+            <xs:enumeration value="OTHER"/>       <!-- any other scalar value -->
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Side / type of quote -->
+    <xs:simpleType name="QuoteSide">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="MID"/>
+            <xs:enumeration value="BID"/>
+            <xs:enumeration value="ASK"/>
+            <xs:enumeration value="LAST"/>
+            <xs:enumeration value="OPEN"/>
+            <xs:enumeration value="CLOSE"/>
+            <xs:enumeration value="SETTLEMENT"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- Optional quality flag -->
+    <xs:simpleType name="QuoteQuality">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="FIRM"/>
+            <xs:enumeration value="INDICATIVE"/>
+            <xs:enumeration value="EXTRAPOLATED"/>
+            <xs:enumeration value="MANUAL"/>
+        </xs:restriction>
+    </xs:simpleType>
+
+    <!-- =========================================================
+         Single quote entry
+         ========================================================= -->
+
+    <xs:complexType name="Quote">
+        <xs:sequence>
+            <!-- Numeric value -->
+            <xs:element name="value" type="xs:double"/>
+
+            <!-- Side: bid / ask / mid / etc. -->
+            <xs:element name="side" type="QuoteSide"/>
+
+            <!-- What the value represents (price, yield, spread, rate, etc.) -->
+            <xs:element name="valueType" type="QuoteValueType"/>
+
+            <!-- Optional: currency, e.g. for prices -->
+            <xs:element name="currency" type="xs:string" minOccurs="0"/>
+
+            <!-- Optional: size / quantity -->
+            <xs:element name="size" type="xs:double" minOccurs="0"/>
+
+            <!-- Optional: per-quote timestamp -->
+            <xs:element name="timestamp" type="xs:dateTime" minOccurs="0"/>
+
+            <!-- Optional: quality flag -->
+            <xs:element name="quality" type="QuoteQuality" minOccurs="0"/>
+
+            <!-- Optional: feed / venue / source -->
+            <xs:element name="source" type="xs:string" minOccurs="0"/>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Quotes for a single instrument
+         ========================================================= -->
+
+    <xs:complexType name="InstrumentQuote">
+        <xs:sequence>
+            <!-- Instrument identifier: ISIN, ticker, internal ID, etc. -->
+            <xs:element name="instrumentId" type="xs:string"/>
+            
+            <!-- One or more quotes -->
+            <xs:element name="quotes">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="quote"
+                                    type="Quote"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- =========================================================
+         Quote set: all instruments for a snapshot
+         ========================================================= -->
+
+    <xs:complexType name="InstrumentQuoteSet">
+        <xs:sequence>
+            <!-- As-of date -->
+            <xs:element name="asOf" type="xs:date"/>
+
+            <!-- Optional precise snapshot time -->
+            <xs:element name="snapshotTime" type="xs:dateTime" minOccurs="0"/>
+
+            <!-- Optional: market / feed name -->
+            <xs:element name="feedName" type="xs:string" minOccurs="0"/>
+
+            <!-- Optional: dataset / scenario name (LIVE, EOD, STRESS_XYZ, …) -->
+            <xs:element name="scenarioName" type="xs:string" minOccurs="0"/>
+
+            <!-- All instrument quotes -->
+            <xs:element name="instruments">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="instrumentQuote"
+                                    type="InstrumentQuote"
+                                    minOccurs="1"
+                                    maxOccurs="unbounded"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:sequence>
+    </xs:complexType>
+
+    <!-- Top-level element -->
+    <xs:element name="InstrumentQuoteSet" type="InstrumentQuoteSet"/>
+
+</xs:schema>
