@@ -13,40 +13,10 @@
 #include "datacontracts/vol.hxx"
 #include "datacontracts/marketdata.hxx"
 #include "interpolation/bspline.h"
-#include "BlackScholes.h"
+#include "OptionQuote.h"
+#include "VolPoint.h"
 
 namespace curve::volatility {
-    /**
-     * @brief Structure to hold option market data for calibration
-     */
-    struct OptionQuote {
-        double strike; // Strike price
-        double maturity; // Time to maturity in years
-        double market_price; // Market price of the option
-        double spot; // Spot price at quote time
-        double forward; // Forward price (if available)
-        bool is_call; // True for call, false for put
-        double moneyness; // K/F or ln(K/F)
-
-        OptionQuote() : strike(0), maturity(0), market_price(0),
-                        spot(0), forward(0), is_call(true), moneyness(0) {
-        }
-    };
-
-    /**
-     * @brief Structure to hold calibrated volatility point
-     */
-    struct VolPoint {
-        double strike;
-        double maturity;
-        double volatility;
-        double moneyness;
-
-        VolPoint(double s, double t, double v, double m = 0)
-            : strike(s), maturity(t), volatility(v), moneyness(m) {
-        }
-    };
-
     /**
      * @brief Implied Volatility Surface Calibration
      *

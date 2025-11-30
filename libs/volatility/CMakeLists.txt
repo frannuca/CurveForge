@@ -3,10 +3,10 @@ cmake_minimum_required(VERSION 3.21)
 find_package(Eigen3 REQUIRED CONFIG)
 
 add_library(volatility
-        src/BlackScholes.cpp
         src/ImpliedVolSurface.cpp
         include/volatility/ImpliedVolSurface.h
-        include/volatility/BlackScholes.h
+        include/volatility/OptionQuote.h
+        include/volatility/VolPoint.h
 )
 
 if (Eigen3_FOUND)
@@ -27,6 +27,8 @@ target_include_directories(volatility
 target_link_libraries(volatility PUBLIC
         CurveForge::datacontracts
         CurveForge::interpolation
+        CurveForge::time
+        CurveForge::analytical_pricers
 )
 add_library(CurveForge::volatility ALIAS volatility)
 

@@ -9,7 +9,11 @@
 #include <numeric>
 #include <set>
 
+#include "analytical_pricers/BlackScholes.h"
+
 namespace curve::volatility {
+    using namespace curve::analytical_pricers;
+
     ImpliedVolSurface::ImpliedVolSurface(
         SurfaceType surface_type,
         InterpolationMethod interp_method,

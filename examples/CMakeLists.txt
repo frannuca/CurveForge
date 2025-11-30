@@ -26,3 +26,17 @@ target_link_libraries(vol_surface_example PRIVATE
 set_target_properties(vol_surface_example PROPERTIES
         OUTPUT_NAME "vol_surface_example"
 )
+
+# B-Spline Smoothing Demonstration
+add_executable(bspline_smoothing_demo
+        bspline_smoothing_demo.cpp
+)
+
+target_link_libraries(bspline_smoothing_demo PRIVATE
+        CurveForge::interpolation
+)
+
+
+set_target_properties(bspline_smoothing_demo PROPERTIES
+        OUTPUT_NAME "bspline_smoothing_demo"
+)

@@ -16,5 +16,5 @@ int main() {
     Date independenceDay = 2023y / 7 / 4;
     assert(calendar->is_holiday(independenceDay) && "July 4, 2023 should be a holiday (Independence Day)");
 
-    std::cout << "CALENDARS_OK" << std::endl;
+    std::cout << "CALENDAR_OK" << std::endl;
 }

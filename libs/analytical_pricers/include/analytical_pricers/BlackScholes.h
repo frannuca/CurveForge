@@ -8,7 +8,7 @@
 #include <cmath>
 #include <stdexcept>
 
-namespace curve::volatility {
+namespace curve::analytical_pricers {
     /**
      * @brief Black-Scholes option pricing and implied volatility utilities
      */

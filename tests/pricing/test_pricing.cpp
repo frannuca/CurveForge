@@ -69,6 +69,6 @@ int main() {
     // With flat curves, the par rate should be very close to the forward rate.
     // Using an epsilon for floating point comparison.
     assert(std::abs(rate - 0.053) < 1e-2);
-    std::cout << "SWAP_OK" << std::endl;
+    std::cout << "PRICING_OK" << std::endl;
     return 0;
 }

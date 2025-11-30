@@ -50,6 +50,7 @@ add_subdirectory(libs/pricing)
 add_subdirectory(libs/time)
 add_subdirectory(libs/instruments)
 add_subdirectory(libs/volatility)
+add_subdirectory(libs/analytical_pricers)
 
 
 if (CURVEFORGE_BUILD_APPS)

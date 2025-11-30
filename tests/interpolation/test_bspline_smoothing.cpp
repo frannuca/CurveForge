@@ -24,8 +24,8 @@ int main() {
     noisy.reserve(N);
     for (int i = 0; i < N; ++i) {
         double x = double(i) / (N - 1);
-        double y = x * x;
-        double noise = 0.05 * std::sin(12.0 * x) * (1.0 - x) * x; // deterministic noise
+        double y = x * x * x;
+        double noise = 0.05 * std::rand() / double(RAND_MAX); // deterministic noise
         if (i != 0 && i != N - 1) y += noise;
         Eigen::Vector2d pt;
         pt << x, y;

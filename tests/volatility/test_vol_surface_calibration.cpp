@@ -7,7 +7,7 @@
 #include <iomanip>
 #include <vector>
 #include "volatility/ImpliedVolSurface.h"
-#include "volatility/BlackScholes.h"
+#include "../../libs/analytical_pricers/include/analytical_pricers/BlackScholes.h"
 
 using namespace curve::volatility;
 
@@ -16,6 +16,7 @@ void print_separator() {
 }
 
 void example_basic_calibration() {
+    using namespace curve::analytical_pricers;
     std::cout << "\n";
     print_separator();
     std::cout << "EXAMPLE 1: Basic Volatility Surface Calibration" << std::endl;
@@ -97,6 +98,7 @@ void example_basic_calibration() {
 }
 
 void example_volatility_interpolation() {
+    using namespace curve::analytical_pricers;
     std::cout << "\n";
     print_separator();
     std::cout << "EXAMPLE 2: Volatility Interpolation" << std::endl;
@@ -166,6 +168,7 @@ void example_volatility_interpolation() {
 }
 
 void example_comparison_of_methods() {
+    using namespace curve::analytical_pricers;
     std::cout << "\n";
     print_separator();
     std::cout << "EXAMPLE 3: Comparison of Interpolation Methods" << std::endl;
@@ -230,6 +233,7 @@ void example_comparison_of_methods() {
 }
 
 void example_implied_vol_calculation() {
+    using namespace curve::analytical_pricers;
     std::cout << "\n";
     print_separator();
     std::cout << "EXAMPLE 4: Direct Implied Volatility Calculation" << std::endl;

@@ -1,13 +1,12 @@
 //
 // Created by Francisco Nunez on 29.11.2025.
 //
-
-#include "volatility/BlackScholes.h"
+#include "analytical_pricers/BlackScholes.h"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
 
-namespace curve::volatility {
+namespace curve::analytical_pricers {
     double BlackScholes::norm_cdf(double x) {
         // Approximation using error function
         return 0.5 * std::erfc(-x * M_SQRT1_2);

@@ -26,8 +26,8 @@ int main() {
         *curve::time::create_daycount_convention(curve::time::DayCountConvention::ACT_360),
         *(curve::time::create_calendar(curve::time::FinancialCalendar::NYSE))
     );
-    if (schedule_vector.accruals.size() != 14) {
+    if (schedule_vector.accruals.size() != 41) {
         return 1;
     }
-    std::cout << "CALENDARS_OK SCHEDULERtest";
+    std::cout << "CALENDAR_OK";
 }

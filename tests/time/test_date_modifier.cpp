@@ -30,6 +30,6 @@ int main() {
     // and be after the holiday
     assert(sys_days{foll} > sys_days{independenceDay});
 
-    std::cout << "DATE_MODIFIER_OK" << std::endl;
+    std::cout << "CALENDAR_OK" << std::endl;
     return 0;
 }

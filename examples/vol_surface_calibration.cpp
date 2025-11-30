@@ -7,7 +7,7 @@
 #include <iomanip>
 #include <vector>
 #include "volatility/ImpliedVolSurface.h"
-#include "volatility/BlackScholes.h"
+#include "../libs/analytical_pricers/include/analytical_pricers/BlackScholes.h"
 
 using namespace curve::volatility;
 
@@ -47,8 +47,10 @@ void example_basic_calibration() {
             // Generate market price using Black-Scholes
             bool is_call = (strike >= spot);
             double market_price = is_call
-                                      ? BlackScholes::call_price(spot, strike, risk_free_rate, true_vol, maturity)
-                                      : BlackScholes::put_price(spot, strike, risk_free_rate, true_vol, maturity);
+                                      ? curve::analytical_pricers::BlackScholes::call_price(
+                                          spot, strike, risk_free_rate, true_vol, maturity)
+                                      : curve::analytical_pricers::BlackScholes::put_price(
+                                          spot, strike, risk_free_rate, true_vol, maturity);
 
             OptionQuote quote;
             quote.strike = strike;
@@ -115,7 +117,7 @@ void example_volatility_interpolation() {
 
     for (const auto &[strike, maturity]: strike_maturity_pairs) {
         double vol = 0.25; // Flat vol for simplicity
-        double price = BlackScholes::call_price(spot, strike, risk_free_rate, vol, maturity);
+        double price = curve::analytical_pricers::BlackScholes::call_price(spot, strike, risk_free_rate, vol, maturity);
 
         OptionQuote quote;
         quote.strike = strike;
@@ -179,7 +181,8 @@ void example_comparison_of_methods() {
     for (double maturity: {0.5, 1.0, 2.0}) {
         for (double strike: {90, 100, 110}) {
             double vol = 0.22;
-            double price = BlackScholes::call_price(spot, strike, risk_free_rate, vol, maturity);
+            double price = curve::analytical_pricers::BlackScholes::call_price(
+                spot, strike, risk_free_rate, vol, maturity);
 
             OptionQuote quote;
             quote.strike = strike;
@@ -242,7 +245,8 @@ void example_implied_vol_calculation() {
     double true_vol = 0.25;
 
     // Generate theoretical option price
-    double call_price = BlackScholes::call_price(spot, strike, risk_free_rate, true_vol, maturity);
+    double call_price = curve::analytical_pricers::BlackScholes::call_price(
+        spot, strike, risk_free_rate, true_vol, maturity);
 
     std::cout << "\nOption Parameters:\n";
     std::cout << "  Spot:         $" << spot << std::endl;
@@ -256,7 +260,7 @@ void example_implied_vol_calculation() {
     std::cout << "\nRecovering implied volatility from market price...\n";
 
     try {
-        double implied_vol = BlackScholes::implied_volatility(
+        double implied_vol = curve::analytical_pricers::BlackScholes::implied_volatility(
             call_price, spot, strike, risk_free_rate, maturity, true
         );
 
@@ -265,7 +269,7 @@ void example_implied_vol_calculation() {
         std::cout << "  Error: " << std::abs(implied_vol - true_vol) * 10000 << " bps\n";
 
         // Also try Brent's method
-        double implied_vol_brent = BlackScholes::implied_volatility_brent(
+        double implied_vol_brent = curve::analytical_pricers::BlackScholes::implied_volatility_brent(
             call_price, spot, strike, risk_free_rate, maturity, true
         );
 
