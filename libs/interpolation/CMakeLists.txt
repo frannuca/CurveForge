@@ -7,6 +7,8 @@ add_library(interpolation
         include/interpolation/linear.h
         src/linear.cpp
         include/interpolation/linear.h
+        src/BilinearInterpolation.cpp
+        include/interpolation/BilinearInterpolation.h
 )
 
 if (Eigen3_FOUND)

@@ -145,6 +145,7 @@ namespace curve::volatility {
             throw std::runtime_error("Surface not calibrated");
         }
 
+        // TODO: we do not track strikes at the moment to extract strikes.
         double x = surface_type_ == SurfaceType::STRIKE_SPACE ? moneyness : moneyness;
 
         switch (interp_method_) {

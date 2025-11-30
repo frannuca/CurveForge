@@ -122,6 +122,7 @@ namespace curve::volatility {
         std::vector<double> strike_grid_;
         Eigen::MatrixXd vol_grid_;
 
+
         // Helper methods
         double compute_moneyness(double strike, double forward) const;
 
