@@ -143,3 +143,17 @@ target_link_libraries(run_volatility_tests
 
 add_test(NAME run_volatility_tests COMMAND run_volatility_tests)
 set_tests_properties(run_volatility_tests PROPERTIES PASS_REGULAR_EXPRESSION "VOL_OK")
+
+
+# optimization  tests
+add_executable(run_opt_tests
+        optimization/test_optimization.cpp
+)
+
+target_link_libraries(run_opt_tests
+        PRIVATE
+        CurveForge::optimization
+)
+
+add_test(NAME run_opt_tests COMMAND run_opt_tests)
+set_tests_properties(run_opt_tests PROPERTIES PASS_REGULAR_EXPRESSION "OPT_OK")

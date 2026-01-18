@@ -60,6 +60,19 @@
         </xs:restriction>
     </xs:simpleType>
 
+
+    <!-- Business day convention -->
+    <xs:simpleType name="BusinessDayConvention">
+        <xs:restriction base="xs:string">
+            <xs:enumeration value="FOLLOWING"/>
+            <xs:enumeration value="MODIFIED_FOLLOWING"/>
+            <xs:enumeration value="PRECEDING"/>
+            <xs:enumeration value="MODIFIED_PRECEDING"/>
+            <xs:enumeration value="UNADJUSTED"/>
+            <xs:enumeration value="NEAREST"/>
+        </xs:restriction>
+    </xs:simpleType>
+
     <!-- =========================================================
          Curve header
          ========================================================= -->
@@ -88,7 +101,7 @@
 
             <!-- Optional: calendar / business day convention names as free text -->
             <xs:element name="calendarName" type="xs:string" minOccurs="0"/>
-            <xs:element name="businessDayConvention" type="xs:string" minOccurs="0"/>
+            <xs:element name="businessDayConvention" type="BusinessDayConvention" minOccurs="0"/>
         </xs:sequence>
     </xs:complexType>
 

@@ -2,12 +2,15 @@ cmake_minimum_required(VERSION 3.21)
 
 set(ANALYTICAL_PRICERS_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/BlackScholes.cpp
+        # Do not add other libraries' source or headers here (e.g. ../optimization/...).
+        # Link to CurveForge::optimization instead so its sources and include dirs
+        # are correctly handled by CMake.
 )
 
 add_library(analytical_pricers ${ANALYTICAL_PRICERS_SOURCES})
 
 # Link internal project dependencies
-target_link_libraries(analytical_pricers PUBLIC CurveForge::time)
+target_link_libraries(analytical_pricers PUBLIC CurveForge::time CurveForge::optimization)
 
 # Public include dir for consumers
 target_include_directories(analytical_pricers
