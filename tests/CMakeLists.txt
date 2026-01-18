@@ -157,3 +157,44 @@ target_link_libraries(run_opt_tests
 
 add_test(NAME run_opt_tests COMMAND run_opt_tests)
 set_tests_properties(run_opt_tests PROPERTIES PASS_REGULAR_EXPRESSION "OPT_OK")
+
+
+# signal tests
+add_executable(run_signal_tests
+        signal/test_ema.cpp
+)
+
+target_link_libraries(run_signal_tests
+        PRIVATE
+        CurveForge::signal
+)
+
+add_test(NAME run_signal_tests COMMAND run_signal_tests)
+set_tests_properties(run_signal_tests PROPERTIES PASS_REGULAR_EXPRESSION "EMA_OK")
+
+# Cross moving average test
+add_executable(run_signal_cma
+        signal/test_cma.cpp
+)
+
+target_link_libraries(run_signal_cma
+        PRIVATE
+        CurveForge::signal
+)
+
+add_test(NAME run_signal_cma COMMAND run_signal_cma)
+
+set_tests_properties(run_signal_cma PROPERTIES PASS_REGULAR_EXPRESSION "CMA_OK")
+
+# signal transforms test
+add_executable(run_signal_transforms
+        signal/test_transforms.cpp
+)
+
+target_link_libraries(run_signal_transforms
+        PRIVATE
+        CurveForge::signal
+)
+
+add_test(NAME run_signal_transforms COMMAND run_signal_transforms)
+set_tests_properties(run_signal_transforms PROPERTIES PASS_REGULAR_EXPRESSION "TRANSFORMS_OK")
