@@ -52,8 +52,11 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from fx_forecasting.data.db import get_metric_series, get_time_series
 from fx_forecasting.data.fx_downloader import MAJOR_FX_PAIRS,SINGLE_FX_PAIRS
+from scipy.stats import norm
+
 from fx_forecasting.features import (
     CLASS_NAMES,
+    CLASS_QUANTILE_EDGES,
     DEFAULT_CMA_WINDOWS,
     CMAWindow,
     CrossingMovingAverages,
@@ -300,6 +303,7 @@ def build_pooled_datasets(
     dict[str, FXSequenceDataset],
     dict[str, FXSequenceDataset],
     dict[str, np.ndarray],
+    dict[str, np.ndarray],
     int,
 ]:
     """Builds one (train, val) dataset per symbol — that symbol's own normalized
@@ -320,11 +324,19 @@ def build_pooled_datasets(
     into one set and every symbol's val pieces into another. Also returns the
     per-symbol train *and* val datasets (unpooled) so predictions can be
     inspected and plotted per instrument — in-sample (train) as well as
-    out-of-sample (val) — plus a per-symbol *daily* (horizon=1) z-scored
-    return array aligned 1:1 with each val dataset's iteration order — used
-    by the strategy backtest (`log_and_plot_strategy_pnl`) as PnL's "return"
-    leg, since the model's own target is an overlapping N-day-ahead return,
-    not a genuinely daily one.
+    out-of-sample (val) — plus:
+
+    - a per-symbol *daily* (horizon=1) z-scored return array aligned 1:1
+      with each val dataset's iteration order — used by the strategy
+      backtest (`log_and_plot_strategy_pnl`) as PnL's "return" leg, since
+      the model's own target is an overlapping N-day-ahead return, not a
+      genuinely daily one.
+    - a per-symbol `horizon`-day z-scored return array (`compute_target_zscore`,
+      the same continuous quantity `target_mode="class"` discretizes into a
+      class label), aligned 1:1 with each val dataset's iteration order —
+      used by `log_hit_rate_summary` so the "class" hit rate can be judged
+      against the real continuous outcome rather than requiring an exact
+      class match (see `compute_hit_rate`).
 
     `raw`: pre-fetched `RawPanels` to reuse instead of hitting Postgres again
     (see `load_raw_panels`) — e.g. across many hyperparameter-search trials
@@ -346,6 +358,7 @@ def build_pooled_datasets(
     normalized_by_symbol: dict[str, pd.DataFrame] = {}
     target_by_symbol: dict[str, pd.Series] = {}
     daily_return_by_symbol: dict[str, np.ndarray] = {}
+    val_zscore_by_symbol: dict[str, np.ndarray] = {}
     num_factors: int | None = None
 
     for symbol in cfg.pairs:
@@ -387,6 +400,12 @@ def build_pooled_datasets(
         daily_target = compute_target_zscore(panel, log_returns, symbol, 1, cfg.seq_len)
         daily_return_by_symbol[symbol] = daily_target.reindex(val_dates).to_numpy()
 
+        # Same `horizon`-day return as `target` itself, but always left as a
+        # continuous z-score (even when `target_mode="class"` discretizes
+        # `target` into a class label) — see `log_hit_rate_summary`.
+        horizon_zscore = compute_target_zscore(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
+        val_zscore_by_symbol[symbol] = horizon_zscore.reindex(val_dates).to_numpy()
+
         logger.info(
             "%s: %d factors, train sequences=%d, val sequences=%d", symbol, num_factors, len(train_ds), len(val_ds)
         )
@@ -400,7 +419,15 @@ def build_pooled_datasets(
         "Pooled across %d symbols: %d factors (per symbol), train sequences=%d, val sequences=%d",
         len(cfg.pairs), num_factors, len(pooled_train), len(pooled_val),
     )
-    return pooled_train, pooled_val, train_datasets_by_symbol, val_datasets, daily_return_by_symbol, num_factors
+    return (
+        pooled_train,
+        pooled_val,
+        train_datasets_by_symbol,
+        val_datasets,
+        daily_return_by_symbol,
+        val_zscore_by_symbol,
+        num_factors,
+    )
 
 
 def build_model(cfg: Config, num_factors: int) -> LSTMAttentionForecaster:
@@ -590,44 +617,80 @@ def collect_predictions(
     return actual, predicted
 
 
-def compute_hit_rate(actual: np.ndarray, predicted: np.ndarray, target_mode: str) -> float:
+# Neutral band, in z-score units, that `compute_hit_rate` counts as a "hit"
+# for a predicted neutral class — the same interior quantile band
+# (`CLASS_QUANTILE_EDGES[2:4]` = 0.3..0.7) that `compute_target_class` itself
+# uses to carve out the neutral class, just expressed in z-score space via
+# the inverse normal CDF instead of quantile space.
+_NEUTRAL_ZSCORE_LOW = float(norm.ppf(CLASS_QUANTILE_EDGES[2]))
+_NEUTRAL_ZSCORE_HIGH = float(norm.ppf(CLASS_QUANTILE_EDGES[3]))
+
+
+def compute_hit_rate(predicted: np.ndarray, actual_zscore: np.ndarray, target_mode: str) -> float:
     """Fraction of samples where the prediction "called it right".
 
-    `target_mode="class"`: exact predicted-class match. `target_mode="zscore"`:
-    same-sign match (both predicted and actual z-score fall on the same side
-    of zero) — the natural direction-call analogue for a continuous target.
+    `target_mode="zscore"`: same-sign match (both predicted and actual
+    z-score fall on the same side of zero) — the natural direction-call
+    analogue for a continuous target.
+
+    `target_mode="class"`: rather than requiring an exact predicted-class
+    match (too strict — e.g. predicting "bullish" when the actual outcome is
+    "very_bullish" is still a correct directional call), a hit is instead:
+    a bearish prediction (`very_bearish`/`bearish`) with `actual_zscore < 0`,
+    a bullish prediction (`bullish`/`very_bullish`) with `actual_zscore > 0`,
+    or a neutral prediction with `actual_zscore` inside the neutral band
+    (`_NEUTRAL_ZSCORE_LOW`..`_NEUTRAL_ZSCORE_HIGH`, matching the same band
+    `compute_target_class` itself uses for the neutral class). `predicted`
+    is still the discrete class index (argmax) in this mode — only the
+    "actual" side is judged continuously, via `actual_zscore` (see
+    `build_pooled_datasets`'s `val_zscore_by_symbol`), not the discretized
+    class label.
+
     This is the metric a trading strategy actually cares about — distinct
     from (and often more informative than) the loss used to train/select the
     model. See `log_naive_baseline` for the real no-skill bar to compare
     against (not a flat 50%/20%, since classes are imbalanced by design).
     """
     if target_mode == "class":
-        return float(np.mean(predicted == actual))
-    return float(np.mean(np.sign(predicted) == np.sign(actual)))
+        neutral_class = CLASS_NAMES.index("neutral")
+        bearish_hit = (predicted < neutral_class) & (actual_zscore < 0)
+        bullish_hit = (predicted > neutral_class) & (actual_zscore > 0)
+        neutral_hit = (predicted == neutral_class) & (actual_zscore >= _NEUTRAL_ZSCORE_LOW) & (
+            actual_zscore <= _NEUTRAL_ZSCORE_HIGH
+        )
+        return float(np.mean(bearish_hit | bullish_hit | neutral_hit))
+    return float(np.mean(np.sign(predicted) == np.sign(actual_zscore)))
 
 
 def log_hit_rate_summary(
-    model: LSTMAttentionForecaster, val_datasets: dict[str, FXSequenceDataset], cfg: Config
+    model: LSTMAttentionForecaster,
+    val_datasets: dict[str, FXSequenceDataset],
+    val_zscore_by_symbol: dict[str, np.ndarray],
+    cfg: Config,
 ) -> None:
     """Logs the hit rate (see `compute_hit_rate`), per symbol and pooled across all of them.
 
     Compare against `log_naive_baseline`'s baseline accuracy for the real
     no-skill bar.
     """
-    metric = "predicted class == actual class" if cfg.target_mode == "class" else "sign(predicted) == sign(actual)"
+    if cfg.target_mode == "class":
+        metric = "bearish/bullish sign match, neutral band match — see compute_hit_rate"
+    else:
+        metric = "sign(predicted) == sign(actual)"
     logger.info("Hit rate (%s):", metric)
-    all_actual, all_predicted = [], []
+    all_predicted, all_zscore = [], []
     for symbol, dataset in val_datasets.items():
         actual, predicted = collect_predictions(model, dataset, cfg)
-        hit_rate = compute_hit_rate(actual, predicted, cfg.target_mode)
+        actual_zscore = val_zscore_by_symbol[symbol] if cfg.target_mode == "class" else actual
+        hit_rate = compute_hit_rate(predicted, actual_zscore, cfg.target_mode)
         logger.info("  %-8s hit_rate=%5.1f%%  (n=%d)", symbol, hit_rate * 100, len(actual))
-        all_actual.append(actual)
         all_predicted.append(predicted)
+        all_zscore.append(actual_zscore)
 
-    pooled_hit_rate = compute_hit_rate(np.concatenate(all_actual), np.concatenate(all_predicted), cfg.target_mode)
+    pooled_hit_rate = compute_hit_rate(np.concatenate(all_predicted), np.concatenate(all_zscore), cfg.target_mode)
     logger.info(
         "  %-8s hit_rate=%5.1f%%  (n=%d, pooled across %d symbols)",
-        "ALL", pooled_hit_rate * 100, sum(len(a) for a in all_actual), len(val_datasets),
+        "ALL", pooled_hit_rate * 100, sum(len(a) for a in all_predicted), len(val_datasets),
     )
 
 
@@ -999,23 +1062,23 @@ def build_parser() -> argparse.ArgumentParser:
     """Builds the CLI parser — factored out of `parse_args` so other tools (e.g. a UI) can
     introspect the full set of available parameters without duplicating this list."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pairs", nargs="+", default=list(MAJOR_FX_PAIRS.keys()))
+    parser.add_argument("--pairs", nargs="+", default=list(SINGLE_FX_PAIRS.keys()))
     parser.add_argument("--years", type=int, default=20)
-    parser.add_argument("--seq-len", type=int, default=40)
+    parser.add_argument("--seq-len", type=int, default=60)
     parser.add_argument("--horizon", type=int, default=5, help="N days ahead for the cumulative-return target.")
     parser.add_argument(
         "--target-mode",
         choices=["zscore", "class"],
-        default="zscore",
+        default="class",
         help="Regression target: continuous return z-score (default) or 5-class direction label.",
     )
-    parser.add_argument("--momentum-window", type=int, default=5)
-    parser.add_argument("--vol-window", type=int, default=10)
+    parser.add_argument("--momentum-window", type=int, default=15)
+    parser.add_argument("--vol-window", type=int, default=20)
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="L2 penalty passed to the Adam optimizer.")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--lr-factor", type=float, default=0.5, help="LR multiplier applied on val loss plateau.")
@@ -1024,7 +1087,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--early-stop-patience",
         type=int,
-        default=10,
+        default=20,
         help="Stop training if val_loss hasn't improved in this many epochs.",
     )
     parser.add_argument(
@@ -1036,7 +1099,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--variance-penalty-weight",
         type=float,
-        default=1.0,
+        default=10.0,
         help="target_mode='zscore' only: weight on (pred.std()-target.std())**2, to counteract collapse to a constant near-zero prediction. 0 disables.",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -1148,9 +1211,15 @@ def main(argv: list[str] | None = None) -> None:
     logger.info("Config: %s", cfg)
     set_seed(cfg.seed)
 
-    train_ds, val_ds, train_datasets_by_symbol, val_datasets_by_symbol, daily_return_by_symbol, num_factors = (
-        build_pooled_datasets(cfg)
-    )
+    (
+        train_ds,
+        val_ds,
+        train_datasets_by_symbol,
+        val_datasets_by_symbol,
+        daily_return_by_symbol,
+        val_zscore_by_symbol,
+        num_factors,
+    ) = build_pooled_datasets(cfg)
 
     if cfg.infer:
         model, checkpoint = load_model(cfg.model_path, cfg.device)
@@ -1173,7 +1242,7 @@ def main(argv: list[str] | None = None) -> None:
     plot_predictions_grid(
         model, train_datasets_by_symbol, cfg, cfg.in_sample_plot_path, sample_label="in-sample (training)"
     )
-    log_hit_rate_summary(model, val_datasets_by_symbol, cfg)
+    log_hit_rate_summary(model, val_datasets_by_symbol, val_zscore_by_symbol, cfg)
     log_and_plot_strategy_pnl(model, val_datasets_by_symbol, daily_return_by_symbol, cfg)
 
 

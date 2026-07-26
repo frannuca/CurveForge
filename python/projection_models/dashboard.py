@@ -31,7 +31,7 @@ from dash import ALL, Dash, Input, Output, State, dcc, html
 import main_lstm
 import optimize_hyperparams
 from fx_forecasting.data.fx_downloader import MAJOR_FX_PAIRS
-from fx_forecasting.hparam_search import DEFAULT_PARAM_SPECS
+from fx_forecasting.hparam_search import DEFAULT_PARAM_SPECS, best_plot_path_for
 
 logger = logging.getLogger(__name__)
 
@@ -397,9 +397,11 @@ def register_run_callback(mode: str, parser: argparse.ArgumentParser, entry_fn) 
             )
             artifacts["pnl_plot_path"] = value_map.get("pnl_plot_path") or resolve_default(parser, "pnl_plot_path")
         else:
-            artifacts["results_csv"] = (
-                value_map.get("load") or value_map.get("results_csv") or resolve_default(parser, "results_csv")
+            results_csv = value_map.get("load") or value_map.get("results_csv") or resolve_default(
+                parser, "results_csv"
             )
+            artifacts["results_csv"] = results_csv
+            artifacts["best_plot_path"] = best_plot_path_for(results_csv) if results_csv else None
 
         start_job(mode, entry_fn, argv)
         RUN_STATE[mode]["artifacts"] = artifacts
@@ -452,26 +454,39 @@ def render_train_artifacts(artifacts: dict[str, str]) -> list:
 
 
 def render_optimize_artifacts(artifacts: dict[str, str]) -> list:
+    """Best-trial-so-far predictions plot (updated live by `optimize_hyperparams.
+    maybe_save_best_prediction_plot` whenever a trial beats every prior one), then the
+    top-10-by-loss table from the results CSV — both refreshed on every poll tick,
+    including while the search is still running (see `register_poll_callback`)."""
+    children = []
+
+    best_plot_src = encode_image(artifacts.get("best_plot_path"))
+    if best_plot_src:
+        children.append(html.H4("Best trial so far — out-of-sample predictions"))
+        children.append(html.Img(src=best_plot_src, style={"maxWidth": "100%"}))
+
     csv_path = artifacts.get("results_csv")
     if not csv_path or not Path(csv_path).exists():
-        return []
+        return children
     try:
         df = pd.read_csv(csv_path)
     except Exception:  # noqa: BLE001
-        return []
+        return children
     df = df[df["status"] == "ok"].sort_values("loss").head(10)
     if df.empty:
-        return [html.Div("No successful trials in results CSV yet.")]
+        children.append(html.Div("No successful trials in results CSV yet."))
+        return children
 
     header = html.Tr([html.Th(c) for c in df.columns])
     rows = [html.Tr([html.Td(f"{v:.4g}" if isinstance(v, float) else v) for v in row]) for row in df.itertuples(index=False)]
-    return [
-        html.H4(f"Top {len(df)} trials — {csv_path}"),
+    children.append(html.H4(f"Top {len(df)} trials — {csv_path}"))
+    children.append(
         html.Table(
             [html.Thead(header), html.Tbody(rows)],
             style={"fontSize": "0.8rem", "borderCollapse": "collapse", "width": "100%"},
-        ),
-    ]
+        )
+    )
+    return children
 
 
 def register_poll_callback(mode: str, render_artifacts, progress_fn) -> None:
@@ -488,9 +503,13 @@ def register_poll_callback(mode: str, render_artifacts, progress_fn) -> None:
         state = RUN_STATE[mode]
         log_text = "\n".join(state["logs"])
         progress = progress_fn(state)
+        # Rendered every tick, running or not, so e.g. optimize_hyperparams's
+        # best-trial-so-far plot updates live during a long search rather than
+        # only appearing once the whole run finishes.
+        artifacts_children = render_artifacts(state["artifacts"])
         if state["running"]:
             status = "Stopping…" if state["cancelled"] else "Running…"
-            return log_text, status, False, [], progress
+            return log_text, status, False, artifacts_children, progress
 
         if state["cancelled"]:
             status = "Stopped by user."
@@ -498,7 +517,7 @@ def register_poll_callback(mode: str, render_artifacts, progress_fn) -> None:
             status = f"Failed: {state['error']}"
         else:
             status = "Done."
-        return log_text, status, True, render_artifacts(state["artifacts"]), progress
+        return log_text, status, True, artifacts_children, progress
 
 
 register_poll_callback("train", render_train_artifacts, train_progress)

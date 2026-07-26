@@ -39,6 +39,17 @@ def compute_engineered_features(
     - momentum: trailing `momentum_window`-day cumulative log return (trend signal).
     - rvol: trailing `vol_window`-day realized volatility (rolling std of daily returns),
       distinct from the longer window used later to rolling-normalize all features.
+    - skew: trailing `vol_window`-day rolling skewness of daily returns — asymmetry of
+      the return distribution (negative skew means a fatter downside/crash tail, the
+      well-documented shape of FX/equity returns).
+    - kurt: trailing `vol_window`-day rolling excess kurtosis of daily returns — tail
+      fatness relative to a normal distribution (pandas' `.kurt()` is already *excess*
+      kurtosis, i.e. 0 for a normal distribution, not the raw convention where normal=3).
+
+    skew/kurt are scale-invariant (computing them on raw vs. standardized
+    returns gives identical values), so they don't need their own explicit
+    z-scoring here — like every other column here, they still get rolling-
+    normalized downstream by `compute_rolling_normalized_features`.
     """
     common_index = panel.index.intersection(high.index).intersection(low.index)
     panel = panel.loc[common_index]
@@ -56,7 +67,13 @@ def compute_engineered_features(
     rvol = log_returns.rolling(window=vol_window).std()
     rvol.columns = [f"{c}_rvol{vol_window}" for c in rvol.columns]
 
-    engineered = pd.concat([intraday_vol, momentum, rvol], axis=1).dropna(how="any")
+    skew = log_returns.rolling(window=vol_window).skew()
+    skew.columns = [f"{c}_skew{vol_window}" for c in skew.columns]
+
+    kurt = log_returns.rolling(window=vol_window).kurt()
+    kurt.columns = [f"{c}_kurt{vol_window}" for c in kurt.columns]
+
+    engineered = pd.concat([intraday_vol, momentum, rvol, skew, kurt], axis=1).dropna(how="any")
     logger.info("Engineered features: %s", engineered.shape)
     return engineered
 
@@ -157,12 +174,15 @@ def build_symbol_frame(
     carry: pd.Series | None = None,
     cma: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """One symbol's own raw (pre-normalization) feature block: return, intraday_vol, momentum, rvol[, carry][, cma...]."""
+    """One symbol's own raw (pre-normalization) feature block: return, intraday_vol,
+    momentum, rvol, skew, kurt[, carry][, cma...]."""
     columns = {
         "return": log_returns[symbol],
         "intraday_vol": engineered[f"{symbol}_intraday_vol"],
         f"momentum{momentum_window}": engineered[f"{symbol}_momentum{momentum_window}"],
         f"rvol{vol_window}": engineered[f"{symbol}_rvol{vol_window}"],
+        f"skew{vol_window}": engineered[f"{symbol}_skew{vol_window}"],
+        f"kurt{vol_window}": engineered[f"{symbol}_kurt{vol_window}"],
     }
     if carry is not None:
         columns["carry"] = carry
@@ -251,3 +271,28 @@ def compute_target_class(
     quantile = compute_target_quantile(panel, log_returns, symbol, horizon, window)
     labels = pd.cut(quantile, bins=CLASS_QUANTILE_EDGES, labels=False, include_lowest=True)
     return pd.Series(labels, index=quantile.index, name=f"cum_return_{horizon}d_class").astype("int64")
+
+
+# 3-class direction labeling of `compute_target_quantile`'s continuous
+# quantile: the same idea as CLASS_NAMES but collapsed to the classic
+# bearish/neutral/bullish triad — bottom/top 30% each for the two tails,
+# middle 40% neutral (equivalent to merging CLASS_QUANTILE_EDGES's two tail
+# pairs on each side). Order matches class index 0-2; DIRECTION_VALUES gives
+# each class's conceptual signed label (-1/0/+1) for anywhere that wants the
+# number rather than the index used for nn.CrossEntropyLoss.
+DIRECTION_CLASS_NAMES: tuple[str, ...] = ("bearish", "neutral", "bullish")
+DIRECTION_VALUES: tuple[int, ...] = (-1, 0, 1)
+DIRECTION_QUANTILE_EDGES: tuple[float, ...] = (0.0, 0.3, 0.7, 1.0)
+
+
+def compute_target_direction(
+    panel: pd.DataFrame, log_returns: pd.DataFrame, symbol: str, horizon: int, window: int
+) -> pd.Series:
+    """Buckets `compute_target_quantile`'s continuous return quantile into 3 discrete
+    direction classes (see `DIRECTION_CLASS_NAMES`/`DIRECTION_VALUES`), returned as
+    integer labels 0-2 for `nn.CrossEntropyLoss` (0=bearish/-1, 1=neutral/0,
+    2=bullish/+1; cut points: `DIRECTION_QUANTILE_EDGES`).
+    """
+    quantile = compute_target_quantile(panel, log_returns, symbol, horizon, window)
+    labels = pd.cut(quantile, bins=DIRECTION_QUANTILE_EDGES, labels=False, include_lowest=True)
+    return pd.Series(labels, index=quantile.index, name=f"cum_return_{horizon}d_direction").astype("int64")

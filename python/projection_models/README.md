@@ -1,18 +1,23 @@
 # FX Forecasting
 
-LSTM + attention forecaster for major FX pairs, trained as a single
-shared-weight model pooled across symbols. Three entry points:
+LSTM forecasters for FX pairs. Four entry points:
 
-- `main_lstm.py` — train (or run inference with) the model.
+- `main_lstm.py` — the main model: every symbol pooled into one
+  shared-weight LSTM + attention model, `target_mode="zscore"` (continuous)
+  or `"class"` (5-class direction) target. Train, evaluate, or run inference.
+- `simple_lstm.py` — a minimal alternative: one symbol at a time, a plain
+  LSTM (no attention, no pooling across symbols), 3-class direction target
+  (bearish/neutral/bullish) — see the "Simple single-symbol model" section
+  below.
 - `optimize_hyperparams.py` — search for good hyperparameters via
-  differential evolution, then feed the result straight back into
-  `main_lstm.py`.
-- `dashboard.py` — a Dash web UI exposing both of the above (see the "Web
-  dashboard" section below).
+  differential evolution (for `main_lstm.py`), then feed the result straight
+  back into it.
+- `dashboard.py` — a Dash web UI exposing training/evaluation and the
+  hyperparameter search (see the "Web dashboard" section below).
 
-See `fx_forecasting/models/README.md` for the model architecture, and the
-module docstrings in `main_lstm.py`/`optimize_hyperparams.py` for more detail
-than this file covers.
+See `fx_forecasting/models/README.md` for the `main_lstm.py` model
+architecture, and the module docstrings in `main_lstm.py`/`simple_lstm.py`/
+`optimize_hyperparams.py` for more detail than this file covers.
 
 ## Setup
 
@@ -21,7 +26,7 @@ uv sync
 cp .env.example .env   # fill in POSTGRES_* and FRED_API_KEY
 ```
 
-Both scripts read FX price data from Postgres and interest-rate data from
+All of these read FX price data from Postgres and interest-rate data from
 FRED (for the carry feature) — populate these once before training:
 
 ```bash
@@ -68,6 +73,44 @@ Key flags (`--help` for the full list):
 | `--infer` | skip training, just load `--model-path` and evaluate/plot |
 | `--params-csv` | apply the best trial from an `optimize_hyperparams.py` run (see below) |
 | `--debug` | shrink everything for a fast, steppable sanity check |
+
+## Simple single-symbol model — `simple_lstm.py`
+
+A deliberately minimal alternative to `main_lstm.py`, for when you want to
+train and inspect a single symbol in isolation rather than the pooled
+multi-symbol model:
+
+- **One symbol** (`--symbol`), not a pooled panel — no `ConcatDataset`
+  machinery at all.
+- **Plain LSTM** (`SimpleLSTMClassifier`, in
+  `fx_forecasting/models/simple_lstm_classifier.py`): the LSTM's own final
+  hidden state feeds directly into a linear layer — no attention pooling.
+- **3-class target**: bearish (-1) / neutral (0) / bullish (+1) for the
+  `--horizon`-day-ahead cumulative return (30/40/30 quantile split — see
+  `fx_forecasting.features.compute_target_direction`), rather than
+  `main_lstm.py`'s 5-class or continuous z-score target.
+
+It still reuses `main_lstm.py`'s feature engineering (return, intraday_vol,
+momentum, rvol, carry, CMA crossovers) and Postgres/FRED data loading, so the
+[Setup](#setup) steps above still apply.
+
+```bash
+# Quick sanity check
+uv run python simple_lstm.py --symbol EURUSD --debug
+
+# A real run
+uv run python simple_lstm.py --symbol EURUSD --years 15 --epochs 200
+
+# Inference only, using a previously trained checkpoint
+uv run python simple_lstm.py --symbol EURUSD --infer --model-path artifacts/simple_lstm_model.pt
+```
+
+Writes `artifacts/simple_lstm_model.pt` and
+`artifacts/simple_lstm_predictions.png` (actual vs. predicted direction over
+the validation set) by default; `--help` for the full flag list, which
+mirrors `main_lstm.py`'s naming (`--seq-len`, `--hidden-size`,
+`--outlier-weight`, `--early-stop-patience`, ...) wherever the same concept
+applies.
 
 ## Searching for hyperparameters — `optimize_hyperparams.py`
 
@@ -130,8 +173,9 @@ itself needs.
 
 ## Web dashboard — `dashboard.py`
 
-A Dash UI over both scripts above, so you don't need the terminal for routine
-runs:
+A Dash UI over `main_lstm.py` and `optimize_hyperparams.py` (not
+`simple_lstm.py`, which has no dashboard tab yet), so you don't need the
+terminal for routine runs:
 
 ```bash
 uv run python dashboard.py
@@ -147,13 +191,18 @@ dashboard itself. Leave a field blank to fall back to that flag's own
 script default.
 
 Runs execute in a background thread (training/search can take a while) so
-the page stays responsive; a log panel streams the captured output live,
-and once a run finishes:
+the page stays responsive; a log panel and a progress bar update live while
+a run is in progress, and:
 
-- **Train / Evaluate** shows the predictions plot and strategy PnL plot
-  inline.
+- **Train / Evaluate** shows the out-of-sample and in-sample predictions
+  plots and the strategy PnL plot once training finishes.
 - **Hyperparameter Search** shows the top 10 trials (by loss) from the
-  results CSV.
+  results CSV, plus an out-of-sample predictions plot for the best trial
+  found *so far* — both refresh live as the search runs, not just once it
+  completes, so you can watch the model actually improve in real time
+  (whenever a trial beats every prior one, `optimize_hyperparams.py`
+  re-saves that plot; works correctly with `--workers` > 1 too — see
+  `maybe_save_best_prediction_plot`'s docstring for why that needed care).
 
 This is a local single-user tool (job state lives in the server process, not
 per-browser-session) — don't expose it beyond localhost.

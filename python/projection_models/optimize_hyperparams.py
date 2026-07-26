@@ -33,6 +33,7 @@ from fx_forecasting.hparam_search import (
     DEFAULT_PARAM_SPECS,
     ParamSpec,
     apply_params,
+    best_plot_path_for,
     decode_params,
     format_as_cli_args,
     load_best_trial,
@@ -43,6 +44,7 @@ from main_lstm import (
     build_model,
     build_pooled_datasets,
     load_raw_panels,
+    plot_predictions_grid,
     set_seed,
     train,
 )
@@ -92,6 +94,42 @@ def append_trial_row(
     return trial_number
 
 
+def maybe_save_best_prediction_plot(
+    cfg: Config, model, val_datasets_by_symbol: dict, loss: float, status: str, results_csv: str
+) -> None:
+    """If `loss` beats every previously-recorded successful trial in `results_csv`,
+    (re)plots this trial's out-of-sample predictions to `best_plot_path_for(results_csv)`
+    — so the dashboard can show "best out-of-sample prediction so far" live while a
+    search is still running, not just once it's finished.
+
+    Reads the CSV's current minimum loss fresh on every call (rather than tracking a
+    shared in-memory "best so far") since trials can run in separate worker processes
+    under `--workers` > 1, which don't share Python memory. Two trials finishing at
+    nearly the same instant could theoretically race here (both reading the same
+    "current best" before either writes), producing a plot that isn't *quite* the
+    true best for a moment — a purely cosmetic, self-healing race (the next genuine
+    improvement corrects it), not a correctness issue: `results_csv` itself, not this
+    plot, is the authoritative record (see `load_best_trial`).
+    """
+    if status != "ok":
+        return
+
+    current_best = None
+    csv_path = Path(results_csv)
+    if csv_path.exists():
+        with open(csv_path, newline="") as f:
+            prior_losses = [float(row["loss"]) for row in csv.DictReader(f) if row["status"] == "ok"]
+        if prior_losses:
+            current_best = min(prior_losses)
+
+    if current_best is not None and loss >= current_best:
+        return
+
+    plot_path = best_plot_path_for(results_csv)
+    plot_predictions_grid(model, val_datasets_by_symbol, cfg, plot_path, sample_label="out-of-sample (validation)")
+    logger.info("New best trial so far (loss=%.5f) — saved prediction plot to %s", loss, plot_path)
+
+
 def run_trial(x: np.ndarray, base_cfg: Config, specs: list[ParamSpec], raw: RawPanels, results_csv: str) -> float:
     """The DE objective body: decode `x` -> fast train -> append a row to `results_csv` ->
     return the resulting val_loss for DE to minimize.
@@ -113,12 +151,13 @@ def run_trial(x: np.ndarray, base_cfg: Config, specs: list[ParamSpec], raw: RawP
     try:
         cfg = apply_params(base_cfg, decoded)
         set_seed(cfg.seed)
-        train_ds, val_ds, _train_datasets, _val_datasets, _daily_returns, num_factors = build_pooled_datasets(
-            cfg, raw=raw
+        train_ds, val_ds, _train_datasets, val_datasets_by_symbol, _daily_returns, _val_zscore, num_factors = (
+            build_pooled_datasets(cfg, raw=raw)
         )
         model = build_model(cfg, num_factors)
         loss = train(model, train_ds, val_ds, cfg)
         status = "ok"
+        maybe_save_best_prediction_plot(cfg, model, val_datasets_by_symbol, loss, status, results_csv)
     except Exception:
         logger.exception("Trial failed with params=%s", decoded)
         loss = FAILED_TRIAL_PENALTY

@@ -11,12 +11,23 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fx_forecasting.features import CMAWindow
 
 if TYPE_CHECKING:
     from main_lstm import Config
+
+
+def best_plot_path_for(results_csv: str) -> str:
+    """Derives the "best trial so far" out-of-sample prediction-plot path from a
+    results CSV path — shared by `optimize_hyperparams.py` (writes it whenever a new
+    best trial is found) and `dashboard.py` (polls for it while a search is running),
+    so the naming convention only lives in one place.
+    """
+    path = Path(results_csv)
+    return str(path.with_name(path.stem + "_best_predictions.png"))
 
 
 @dataclass(frozen=True)
