@@ -17,7 +17,6 @@ Then open http://127.0.0.1:8050/
 from __future__ import annotations
 
 import argparse
-import base64
 import logging
 import re
 import threading
@@ -26,7 +25,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
+import plotly.graph_objects as go
 from dash import ALL, Dash, Input, Output, State, dcc, html
+from plotly.subplots import make_subplots
 
 import main_lstm
 import optimize_hyperparams
@@ -45,6 +46,22 @@ EPOCH_LOG_RE = re.compile(r"epoch\s+(\d+)/(\d+)")
 # ----------------------------------------------------------------------------
 
 
+# Logger-name prefixes for this project's own model/training/data code (every module here
+# uses `logging.getLogger(__name__)`, so these match exactly). Attaching `ModelOnlyFilter`
+# to the dashboard's log handler keeps the browser's log panel to lines that actually
+# describe what a run is doing, dropping infrastructure noise that would otherwise flood it —
+# Werkzeug's per-request access log (one line per `dcc.Interval` poll while a job runs),
+# urllib3/psycopg connection chatter, matplotlib font-cache messages, and the like.
+MODEL_LOG_PREFIXES = ("main_lstm", "optimize_hyperparams", "simple_lstm", "fx_forecasting")
+
+
+class ModelOnlyFilter(logging.Filter):
+    """Keeps only records from `MODEL_LOG_PREFIXES` loggers."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name.startswith(MODEL_LOG_PREFIXES)
+
+
 class ListLogHandler(logging.Handler):
     """Appends formatted log records to a plain list, polled by the UI."""
 
@@ -52,6 +69,7 @@ class ListLogHandler(logging.Handler):
         super().__init__()
         self.sink = sink
         self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        self.addFilter(ModelOnlyFilter())
 
     def emit(self, record: logging.LogRecord) -> None:
         self.sink.append(self.format(record))
@@ -149,7 +167,7 @@ def build_argv(parser: argparse.ArgumentParser, values: dict[str, Any]) -> list[
         value = values[dest]
         flag = action.option_strings[0]
 
-        if isinstance(action, argparse._StoreTrueAction):  # noqa: SLF001
+        if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):  # noqa: SLF001
             if value:  # dcc.Checklist value is a list, e.g. ["on"] or []
                 argv.append(flag)
             continue
@@ -167,13 +185,97 @@ def build_argv(parser: argparse.ArgumentParser, values: dict[str, Any]) -> list[
     return argv
 
 
-def encode_image(path: str | None) -> str | None:
-    if not path:
+def render_interactive_plot(csv_path: str | None, kind: str, title: str):
+    """Builds an interactive (zoomable, hoverable) Plotly figure from a `main_lstm.py`-written
+    sidecar CSV (see `plot_predictions_grid`/`log_and_plot_strategy_pnl`), replacing the older
+    static-PNG-embedding approach — Plotly's own default box-zoom/scroll-zoom/pan and
+    hover-on-cursor-move tooltip need no extra code beyond building the figure and returning it
+    inside a `dcc.Graph`.
+
+    `kind`: `"predictions"` (CSV columns `date, symbol, actual, predicted`), `"pnl"` (CSV
+    columns `date, symbol, net_cumulative`), or `"positions"` (CSV columns `date, symbol,
+    position, daily_return, pnl_with_costs, pnl_without_costs`, from
+    `main_lstm.plot_positions_and_pnl` — position/return on the left axis, both PnL curves on
+    a secondary right axis, mirroring that plot's `ax.twinx()`) — selects which column(s)
+    become traces. One subplot row per symbol, mirroring the static PNG's
+    one-panel-per-symbol layout (`"pnl"`'s pooled series arrives as an ordinary `symbol="ALL"`
+    row, so it gets its own panel too, just like the PNG's final comparison panel).
+    """
+    if not csv_path or not Path(csv_path).exists():
         return None
-    p = Path(path)
-    if not p.exists():
+    try:
+        df = pd.read_csv(csv_path, parse_dates=["date"])
+    except Exception:  # noqa: BLE001
         return None
-    return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode("ascii")
+    if df.empty:
+        return None
+
+    symbols = list(dict.fromkeys(df["symbol"]))  # de-duplicated, CSV's own (insertion) order
+    fig = make_subplots(
+        rows=len(symbols), cols=1, shared_xaxes=False, subplot_titles=symbols,
+        specs=[[{"secondary_y": True}] for _ in symbols],
+    )
+
+    for i, symbol in enumerate(symbols, start=1):
+        rows = df[df["symbol"] == symbol]
+        if kind == "predictions":
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["actual"], name="actual", mode="lines",
+                    legendgroup="actual", showlegend=(i == 1), line={"color": "#1f77b4"},
+                ),
+                row=i, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["predicted"], name="predicted", mode="lines",
+                    legendgroup="predicted", showlegend=(i == 1), line={"color": "#ff7f0e"},
+                ),
+                row=i, col=1,
+            )
+        elif kind == "positions":
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["position"], name="position", mode="lines",
+                    line_shape="hv", legendgroup="position", showlegend=(i == 1), line={"color": "#1f77b4"},
+                ),
+                row=i, col=1, secondary_y=False,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["daily_return"], name="daily return", mode="lines",
+                    legendgroup="daily_return", showlegend=(i == 1), line={"color": "#888888", "width": 1},
+                ),
+                row=i, col=1, secondary_y=False,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["pnl_with_costs"], name="PnL (with costs)", mode="lines",
+                    legendgroup="pnl_with", showlegend=(i == 1), line={"color": "#2b8a3e"},
+                ),
+                row=i, col=1, secondary_y=True,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["pnl_without_costs"], name="PnL (no costs)", mode="lines",
+                    legendgroup="pnl_without", showlegend=(i == 1), line={"color": "#ff7f0e", "dash": "dash"},
+                ),
+                row=i, col=1, secondary_y=True,
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=rows["date"], y=rows["net_cumulative"], name=symbol, mode="lines",
+                    showlegend=False, line={"color": "#2b8a3e" if symbol == "ALL" else "#1f77b4"},
+                ),
+                row=i, col=1,
+            )
+
+    fig.update_layout(
+        title=title, height=max(260, 220 * len(symbols)), hovermode="x unified",
+        margin={"l": 50, "r": 20, "t": 60, "b": 40},
+    )
+    return dcc.Graph(figure=fig, config={"scrollZoom": True, "displayModeBar": True})
 
 
 def render_progress_bar(label: str, percent: float | None):
@@ -257,7 +359,11 @@ def field_component(action: argparse.Action, id_prefix: str):
     dest = action.dest
     comp_id = {"type": f"{id_prefix}-field", "dest": dest}
 
-    if isinstance(action, argparse._StoreTrueAction):  # noqa: SLF001
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):  # noqa: SLF001
+        # Both are zero-argument "presence toggles the default" flags — the checkbox
+        # always starts unchecked (flag omitted, script default applies), whether that
+        # default is False (--debug, a _StoreTrueAction) or True (--no-predict-uncertainty,
+        # a _StoreFalseAction); checking it adds the flag either way.
         return dcc.Checklist(id=comp_id, options=[{"label": " enabled", "value": "on"}], value=[])
 
     if action.choices:
@@ -396,6 +502,16 @@ def register_run_callback(mode: str, parser: argparse.ArgumentParser, entry_fn) 
                 parser, "in_sample_plot_path"
             )
             artifacts["pnl_plot_path"] = value_map.get("pnl_plot_path") or resolve_default(parser, "pnl_plot_path")
+            artifacts["test_plot_path"] = value_map.get("test_plot_path") or resolve_default(parser, "test_plot_path")
+            artifacts["test_pnl_plot_path"] = value_map.get("test_pnl_plot_path") or resolve_default(
+                parser, "test_pnl_plot_path"
+            )
+            artifacts["positions_pnl_plot_path"] = value_map.get("positions_pnl_plot_path") or resolve_default(
+                parser, "positions_pnl_plot_path"
+            )
+            artifacts["test_positions_pnl_plot_path"] = value_map.get(
+                "test_positions_pnl_plot_path"
+            ) or resolve_default(parser, "test_positions_pnl_plot_path")
         else:
             results_csv = value_map.get("load") or value_map.get("results_csv") or resolve_default(
                 parser, "results_csv"
@@ -441,15 +557,24 @@ register_stop_callback("optimize")
 
 def render_train_artifacts(artifacts: dict[str, str]) -> list:
     children = []
-    for key, title in (
-        ("plot_path", "Out-of-sample (validation) predictions"),
-        ("in_sample_plot_path", "In-sample (training) predictions"),
-        ("pnl_plot_path", "Strategy PnL (out-of-sample)"),
+    for key, title, kind in (
+        ("plot_path", "Out-of-sample (validation) predictions", "predictions"),
+        ("in_sample_plot_path", "In-sample (training) predictions", "predictions"),
+        ("pnl_plot_path", "Strategy PnL (out-of-sample)", "pnl"),
+        ("positions_pnl_plot_path", "Positions & PnL detail (out-of-sample)", "positions"),
+        ("test_plot_path", "Final holdout (test) predictions — evaluated once", "predictions"),
+        ("test_pnl_plot_path", "Strategy PnL (final holdout / test)", "pnl"),
+        ("test_positions_pnl_plot_path", "Positions & PnL detail (final holdout / test)", "positions"),
     ):
-        src = encode_image(artifacts.get(key))
-        if src:
+        png_path = artifacts.get(key)
+        csv_path = str(Path(png_path).with_suffix(".csv")) if png_path else None
+        graph = render_interactive_plot(csv_path, kind, title)
+        # `is not None`, not a plain truthiness check: dcc.Graph (like other Dash
+        # components) implements __len__ via its children/props, so a populated
+        # but childless Graph is falsy under `if graph:` even though it's valid.
+        if graph is not None:
             children.append(html.H4(title))
-            children.append(html.Img(src=src, style={"maxWidth": "100%"}))
+            children.append(graph)
     return children
 
 
@@ -460,10 +585,12 @@ def render_optimize_artifacts(artifacts: dict[str, str]) -> list:
     including while the search is still running (see `register_poll_callback`)."""
     children = []
 
-    best_plot_src = encode_image(artifacts.get("best_plot_path"))
-    if best_plot_src:
+    best_plot_path = artifacts.get("best_plot_path")
+    best_csv_path = str(Path(best_plot_path).with_suffix(".csv")) if best_plot_path else None
+    best_graph = render_interactive_plot(best_csv_path, "predictions", "Best trial so far — out-of-sample predictions")
+    if best_graph is not None:  # dcc.Graph is falsy under a plain `if` — see render_train_artifacts
         children.append(html.H4("Best trial so far — out-of-sample predictions"))
-        children.append(html.Img(src=best_plot_src, style={"maxWidth": "100%"}))
+        children.append(best_graph)
 
     csv_path = artifacts.get("results_csv")
     if not csv_path or not Path(csv_path).exists():

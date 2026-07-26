@@ -151,9 +151,16 @@ def run_trial(x: np.ndarray, base_cfg: Config, specs: list[ParamSpec], raw: RawP
     try:
         cfg = apply_params(base_cfg, decoded)
         set_seed(cfg.seed)
-        train_ds, val_ds, _train_datasets, val_datasets_by_symbol, _daily_returns, _val_zscore, num_factors = (
-            build_pooled_datasets(cfg, raw=raw)
-        )
+        (
+            train_ds,
+            val_ds,
+            _test_ds,
+            _train_datasets,
+            val_datasets_by_symbol,
+            _test_datasets,
+            _market_data,
+            num_factors,
+        ) = build_pooled_datasets(cfg, raw=raw)
         model = build_model(cfg, num_factors)
         loss = train(model, train_ds, val_ds, cfg)
         status = "ok"
@@ -192,6 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
     introspect the full set of available parameters without duplicating this list."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pairs", nargs="+", default=None, help="Defaults to Config's default pairs.")
+    parser.add_argument(
+        "--target-symbol", default=None,
+        help="If set, search for a model forecasting only this one pair (must be one of --pairs); "
+        "--pairs still supplies the input universe. Default: pool every --pairs symbol.",
+    )
     parser.add_argument("--years", type=int, default=10, help="Data window to optimize over.")
     parser.add_argument("--target-mode", choices=["zscore", "class"], default="zscore")
     parser.add_argument(
@@ -239,6 +251,7 @@ def main(argv: list[str] | None = None) -> None:
 
     base_cfg = Config(
         pairs=args.pairs or Config().pairs,
+        target_symbol=args.target_symbol,
         years=args.years,
         target_mode=args.target_mode,
         epochs=args.trial_epochs,

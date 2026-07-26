@@ -69,6 +69,14 @@ from fx_forecasting.features import (
     compute_target_zscore,
 )
 from fx_forecasting.models.lstm_forecaster import LSTMAttentionForecaster
+from fx_forecasting.trading import (
+    LinearCalibrator,
+    annualized_sharpe,
+    fit_linear_calibrator,
+    net_strategy_returns,
+    positions_from_signal,
+    purged_train_val_test_split,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +90,12 @@ CANCEL_EVENT = threading.Event()
 class Config:
     pairs: list[str] = field(default_factory=lambda: list(MAJOR_FX_PAIRS.keys()))
     years: int = 20
+    # When set, the model is trained to forecast only this one pair — `pairs` still
+    # defines the input universe (cross-asset xret_* features, carry, CMA, etc.), but
+    # `build_pooled_datasets` builds/pools a single symbol's dataset instead of one
+    # per pair. Must be one of `pairs`. `None` (default) keeps today's behavior:
+    # every pair in `pairs` is pooled, each forecasting its own target.
+    target_symbol: str | None = None
 
     seq_len: int = 60
     horizon: int = 2  # N days ahead for the single cumulative-return target
@@ -106,15 +120,33 @@ class Config:
     lr_patience: int = 3  # epochs with no val loss improvement before reducing LR
     min_lr: float = 1e-6
     early_stop_patience: int = 10  # stop training if val loss hasn't improved in this many epochs
-    outlier_weight: float = 2.0  # extra loss weight for classes far from neutral (see class_distance_weights); 0 = plain CE
-    variance_penalty_weight: float = 1.0  # zscore mode only: penalizes pred.std() vs target.std(); counteracts collapse to a constant near-zero prediction; 0 disables
+    outlier_weight: float = 0.0  # start with calibrated likelihood; tune only inside walk-forward development folds
+    variance_penalty_weight: float = 0.0  # kept for backwards-compatible experiments; disabled by default
     val_fraction: float = 0.2
+    test_fraction: float = 0.1
+    predict_uncertainty: bool = True
+    use_spectral_features: bool = False  # off by default — validate via purged walk-forward before defaulting on
+    spectral_embedding_dim: int = 8
+    spectral_freq_bins: int = 16
+    # If set, reduces the len(pairs) cross-asset xret_* input columns to this many learned,
+    # PCA-like linear factors before the encoder (and spectral embedding, if also enabled)
+    # ever sees them — see fx_forecasting.models.cross_asset_projection. Must be strictly
+    # between 0 and len(pairs); None (default) leaves the raw xret_* columns untouched.
+    cross_asset_pca_dim: int | None = None
+    transaction_cost_bps: float = 1.0
+    signal_threshold: float = 0.10
+    signal_leverage: float = 0.50
+    max_position: float = 1.0
 
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     plot_path: str = "artifacts/lstm_predictions.png"
     in_sample_plot_path: str = "artifacts/lstm_predictions_in_sample.png"
+    test_plot_path: str = "artifacts/lstm_predictions_test.png"
     pnl_plot_path: str = "artifacts/lstm_pnl.png"
+    test_pnl_plot_path: str = "artifacts/lstm_pnl_test.png"
+    positions_pnl_plot_path: str = "artifacts/lstm_positions_pnl.png"
+    test_positions_pnl_plot_path: str = "artifacts/lstm_positions_pnl_test.png"
     model_path: str = "artifacts/lstm_model.pt"
     features_csv_path: str = "artifacts/features.csv"
     write_features_csv: bool = True  # set False to skip the CSV write (e.g. many fast hyperparameter-search trials)
@@ -215,16 +247,25 @@ class FXSequenceDataset(Dataset):
     `fx_forecasting.features.compute_target_zscore`), stored as `torch.float32`.
     """
 
-    def __init__(self, features: np.ndarray, target: np.ndarray, seq_len: int) -> None:
+    def __init__(
+        self, features: np.ndarray, target: np.ndarray, seq_len: int, dates: pd.Index, origin_start: int, origin_end: int
+    ) -> None:
         self.features = torch.as_tensor(np.asarray(features).copy(), dtype=torch.float32)
         target_array = np.asarray(target)
         target_dtype = torch.long if np.issubdtype(target_array.dtype, np.integer) else torch.float32
         self.targets = torch.as_tensor(target_array.copy(), dtype=target_dtype)
         self.seq_len = seq_len
+        self.dates = pd.DatetimeIndex(dates)
 
         # Row i in `features`/`target` corresponds to a window ending at i
         # (inclusive), i.e. sample i uses features[i - seq_len + 1 : i + 1].
-        self.valid_indices = list(range(seq_len - 1, len(self.features)))
+        self.valid_indices = list(range(max(seq_len - 1, origin_start), origin_end))
+        if not self.valid_indices:
+            raise ValueError("split contains no complete sequences")
+
+    @property
+    def sample_dates(self) -> pd.DatetimeIndex:
+        return self.dates[self.valid_indices]
 
     def __len__(self) -> int:
         return len(self.valid_indices)
@@ -239,28 +280,25 @@ class FXSequenceDataset(Dataset):
 
 def build_datasets(
     features: pd.DataFrame, target: pd.Series, cfg: Config
-) -> tuple[FXSequenceDataset, FXSequenceDataset]:
-    """Time-ordered train/val split for a single symbol's features/target. Fit-free (rolling) normalization."""
+) -> tuple[FXSequenceDataset, FXSequenceDataset, FXSequenceDataset]:
+    """Purged chronological train/validation/test sets for one symbol.
+
+    The label at a forecast origin uses the next ``cfg.horizon`` prices, so a
+    horizon-sized embargo separates every adjacent fold.
+    """
     aligned_index = features.index.intersection(target.index)
     features = features.loc[aligned_index]
     target = target.loc[aligned_index]
 
-    n_val = int(len(aligned_index) * cfg.val_fraction)
-    n_train = len(aligned_index) - n_val
-    if n_train <= cfg.seq_len:
-        raise ValueError(f"Not enough training rows ({n_train}) for seq_len={cfg.seq_len}")
-
-    train_features_df = features.iloc[:n_train]
-    val_features_df = features.iloc[n_train - cfg.seq_len + 1 :]  # keep lookback context for val
-
-    train_target = target.iloc[:n_train]
-    val_target = target.iloc[n_train - cfg.seq_len + 1 :]
-
-    train_ds = FXSequenceDataset(
-        train_features_df.to_numpy(dtype=np.float32), train_target.to_numpy(), cfg.seq_len
+    split = purged_train_val_test_split(
+        len(aligned_index), cfg.val_fraction, cfg.test_fraction, cfg.horizon, cfg.seq_len
     )
-    val_ds = FXSequenceDataset(val_features_df.to_numpy(dtype=np.float32), val_target.to_numpy(), cfg.seq_len)
-    return train_ds, val_ds
+    values = features.to_numpy(dtype=np.float32)
+    targets = target.to_numpy()
+    train_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, cfg.seq_len - 1, split.train_end)
+    val_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, split.val_start, split.val_end)
+    test_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, split.test_start, split.test_end)
+    return train_ds, val_ds, test_ds
 
 
 def save_features_csv(
@@ -300,10 +338,11 @@ def build_pooled_datasets(
 ) -> tuple[
     ConcatDataset,
     ConcatDataset,
+    ConcatDataset,
     dict[str, FXSequenceDataset],
     dict[str, FXSequenceDataset],
-    dict[str, np.ndarray],
-    dict[str, np.ndarray],
+    dict[str, FXSequenceDataset],
+    dict[str, pd.DataFrame],
     int,
 ]:
     """Builds one (train, val) dataset per symbol — that symbol's own normalized
@@ -322,21 +361,38 @@ def build_pooled_datasets(
     time-ordered train/val split (no lookahead across the split boundary).
     Pooling happens afterwards, by concatenating every symbol's train pieces
     into one set and every symbol's val pieces into another. Also returns the
-    per-symbol train *and* val datasets (unpooled) so predictions can be
-    inspected and plotted per instrument — in-sample (train) as well as
-    out-of-sample (val) — plus:
+    per-symbol train, val *and* test datasets (unpooled) so predictions can
+    be inspected and plotted per instrument — in-sample (train), development
+    out-of-sample (val), and a final untouched holdout (test) — plus a
+    per-symbol `market_data_by_symbol` DataFrame (indexed by date, covering
+    every split at once — the caller reindexes to whichever split's dates it
+    needs, e.g. via `FXSequenceDataset.sample_dates`) with:
 
-    - a per-symbol *daily* (horizon=1) z-scored return array aligned 1:1
-      with each val dataset's iteration order — used by the strategy
-      backtest (`log_and_plot_strategy_pnl`) as PnL's "return" leg, since
-      the model's own target is an overlapping N-day-ahead return, not a
-      genuinely daily one.
-    - a per-symbol `horizon`-day z-scored return array (`compute_target_zscore`,
-      the same continuous quantity `target_mode="class"` discretizes into a
-      class label), aligned 1:1 with each val dataset's iteration order —
+    - `next_log_return`: the actual next-day executable log return (not a
+      z-score) — the real "return" leg for the execution-aware backtest
+      (`log_and_plot_strategy_pnl`, `fx_forecasting.trading.net_strategy_returns`).
+    - `daily_carry`: that day's interest-rate carry, converted from an
+      annualized percentage to a daily rate — the backtest's carry leg.
+    - `horizon_zscore`: the same `horizon`-day return z-score `target`
+      itself is (or is discretized from, under `target_mode="class"`) —
       used by `log_hit_rate_summary` so the "class" hit rate can be judged
       against the real continuous outcome rather than requiring an exact
       class match (see `compute_hit_rate`).
+
+    Train/val/test are chronological and *purged*: `fx_forecasting.trading.
+    purged_train_val_test_split` embargoes `horizon` origins around each
+    split boundary, since a label at origin `t` looks `horizon` days ahead —
+    without the embargo, the last training origins before validation (and
+    the last validation origins before test) would have labels drawn partly
+    from the next split's price history. The test split is meant to be
+    evaluated only once, after all tuning is done on train/val.
+
+    `target_symbol` (if set) restricts this to a *single* pair's dataset:
+    `pairs` still supplies the full input universe (cross-asset `xret_*`
+    returns, carry, CMA, cross-sectional features all still cover every pair
+    in `pairs`), but only `target_symbol` is actually forecast — useful when
+    the goal is one specific pair's forecast informed by the whole universe's
+    context, rather than a shared model pooled across every pair's own target.
 
     `raw`: pre-fetched `RawPanels` to reuse instead of hitting Postgres again
     (see `load_raw_panels`) — e.g. across many hyperparameter-search trials
@@ -347,24 +403,46 @@ def build_pooled_datasets(
         raw = load_raw_panels(cfg)
     panel, high, low, rates = raw.panel, raw.high, raw.low, raw.rates
 
+    if cfg.target_symbol is not None and cfg.target_symbol not in cfg.pairs:
+        raise ValueError(f"target_symbol={cfg.target_symbol!r} must be one of pairs={cfg.pairs}")
+    symbols_to_build = [cfg.target_symbol] if cfg.target_symbol is not None else list(cfg.pairs)
+
     log_returns = compute_log_returns(panel)
     engineered = compute_engineered_features(panel, log_returns, high, low, cfg.momentum_window, cfg.vol_window)
     carry = compute_carry_feature(cfg.pairs, rates)
     cma = CrossingMovingAverages(cfg.cma_windows).compute(panel)
+    cross_mean_return = log_returns.mean(axis=1).rename("cross_mean_return")
+    cross_return_rank = log_returns.rank(axis=1, pct=True)
+    cross_carry_rank = carry.rank(axis=1, pct=True)
 
     train_datasets = []
     train_datasets_by_symbol: dict[str, FXSequenceDataset] = {}
     val_datasets: dict[str, FXSequenceDataset] = {}
+    test_datasets: dict[str, FXSequenceDataset] = {}
     normalized_by_symbol: dict[str, pd.DataFrame] = {}
     target_by_symbol: dict[str, pd.Series] = {}
-    daily_return_by_symbol: dict[str, np.ndarray] = {}
-    val_zscore_by_symbol: dict[str, np.ndarray] = {}
+    market_data_by_symbol: dict[str, pd.DataFrame] = {}
     num_factors: int | None = None
 
-    for symbol in cfg.pairs:
+    for symbol in symbols_to_build:
         symbol_cma = cma[[f"{symbol}_{w.name}" for w in cfg.cma_windows]]
         symbol_cma.columns = [w.name for w in cfg.cma_windows]
 
+        # One column per pair's own daily log return (including `symbol` itself,
+        # which duplicates the `return` column below) — gives the model direct
+        # access to every other pair's actual return, not just the coarse
+        # cross-sectional summaries above, so it can learn asset-specific
+        # co-movement/lead-lag structure. Every symbol's dataset gets the
+        # identical set of `xret_{pair}` slots in the same order (`pairs`, not
+        # `symbols_to_build`), so slot identity ("xret_EURUSD" always means
+        # EURUSD's own return) is consistent regardless of which symbol is
+        # "self" or whether `target_symbol` narrows `symbols_to_build` to one.
+        # Raw (unbounded) return-scale series, so these go through the same
+        # rolling z-score as `return` itself below, no special-casing needed.
+        extra_features = pd.DataFrame(
+            {"cross_mean_return": cross_mean_return}
+            | {f"xret_{pair}": log_returns[pair] for pair in sorted(cfg.pairs)}
+        )
         frame = build_symbol_frame(
             symbol,
             log_returns,
@@ -373,8 +451,36 @@ def build_pooled_datasets(
             cfg.vol_window,
             carry=carry[symbol],
             cma=symbol_cma,
+            extra_features=extra_features,
         )
         normalized = compute_rolling_normalized_features(frame, cfg.seq_len)
+
+        # The two rank features are already bounded/comparable by construction
+        # (percentile rank across pairs at each date) and, with few pairs or a
+        # carry differential that changes rarely, can stay literally constant
+        # for stretches far longer than `seq_len` — a rolling window entirely
+        # inside such a stretch has std=0, which `compute_rolling_normalized_features`
+        # turns into NaN and then drops via `dropna(how="any")`, silently
+        # zeroing out the whole symbol. Added post-normalization instead
+        # (recentered to ~[-0.5, 0.5]).
+        normalized["cross_return_rank"] = (cross_return_rank[symbol] - 0.5).reindex(normalized.index)
+        normalized["cross_carry_rank"] = (cross_carry_rank[symbol] - 0.5).reindex(normalized.index)
+
+        if cfg.target_symbol is None:
+            # Static identity indicators make the shared model pair-aware without
+            # contaminating the time-series normalisation of dynamic features.
+            # Skipped when forecasting a single `target_symbol`: with only one
+            # symbol ever "self", this one-hot would just be a constant column.
+            for pair in cfg.pairs:
+                normalized[f"pair_{pair}"] = float(pair == symbol)
+
+        # Move the xret_* block to the trailing len(cfg.pairs) columns, regardless of
+        # where they landed above — gives the model (see `cross_asset_pca_dim`,
+        # `CrossAssetFactorProjection`) a stable, predictable slice to reduce, without
+        # it needing any column-name awareness of its own.
+        xret_columns = [f"xret_{pair}" for pair in sorted(cfg.pairs)]
+        other_columns = [c for c in normalized.columns if c not in xret_columns]
+        normalized = normalized[other_columns + xret_columns]
         num_factors = normalized.shape[1]
 
         if cfg.target_mode == "class":
@@ -384,30 +490,23 @@ def build_pooled_datasets(
         normalized_by_symbol[symbol] = normalized
         target_by_symbol[symbol] = target
 
-        train_ds, val_ds = build_datasets(normalized, target, cfg)
+        train_ds, val_ds, test_ds = build_datasets(normalized, target, cfg)
         train_datasets.append(train_ds)
         train_datasets_by_symbol[symbol] = train_ds
         val_datasets[symbol] = val_ds
-
-        # Daily (horizon=1) z-scored return for the same validation dates,
-        # in the same order `collect_predictions` iterates the val dataset —
-        # see the docstring above for why this (not `target`) is the PnL
-        # return leg. `aligned_index`/`n_train` replicate `build_datasets`'
-        # own split arithmetic; the val dates are exactly its tail `n_val` rows.
+        test_datasets[symbol] = test_ds
         aligned_index = normalized.index.intersection(target.index)
-        n_train = len(aligned_index) - int(len(aligned_index) * cfg.val_fraction)
-        val_dates = aligned_index[n_train:]
-        daily_target = compute_target_zscore(panel, log_returns, symbol, 1, cfg.seq_len)
-        daily_return_by_symbol[symbol] = daily_target.reindex(val_dates).to_numpy()
-
-        # Same `horizon`-day return as `target` itself, but always left as a
-        # continuous z-score (even when `target_mode="class"` discretizes
-        # `target` into a class label) — see `log_hit_rate_summary`.
-        horizon_zscore = compute_target_zscore(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
-        val_zscore_by_symbol[symbol] = horizon_zscore.reindex(val_dates).to_numpy()
+        market_data_by_symbol[symbol] = pd.DataFrame(
+            {
+                "next_log_return": log_returns[symbol].shift(-1).reindex(aligned_index),
+                "daily_carry": (carry[symbol] / 100.0 / 252.0).reindex(aligned_index),
+                "horizon_zscore": compute_target_zscore(panel, log_returns, symbol, cfg.horizon, cfg.seq_len).reindex(aligned_index),
+            },
+            index=aligned_index,
+        )
 
         logger.info(
-            "%s: %d factors, train sequences=%d, val sequences=%d", symbol, num_factors, len(train_ds), len(val_ds)
+            "%s: %d factors, train=%d, val=%d, test=%d", symbol, num_factors, len(train_ds), len(val_ds), len(test_ds)
         )
 
     if cfg.write_features_csv:
@@ -415,29 +514,44 @@ def build_pooled_datasets(
 
     pooled_train = ConcatDataset(train_datasets)
     pooled_val = ConcatDataset(list(val_datasets.values()))
+    pooled_test = ConcatDataset(list(test_datasets.values()))
     logger.info(
-        "Pooled across %d symbols: %d factors (per symbol), train sequences=%d, val sequences=%d",
-        len(cfg.pairs), num_factors, len(pooled_train), len(pooled_val),
+        "Pooled across %d symbols: %d factors, train=%d, val=%d, test=%d",
+        len(symbols_to_build), num_factors, len(pooled_train), len(pooled_val), len(pooled_test),
     )
     return (
         pooled_train,
         pooled_val,
+        pooled_test,
         train_datasets_by_symbol,
         val_datasets,
-        daily_return_by_symbol,
-        val_zscore_by_symbol,
+        test_datasets,
+        market_data_by_symbol,
         num_factors,
     )
 
 
 def build_model(cfg: Config, num_factors: int) -> LSTMAttentionForecaster:
     output_size = len(CLASS_NAMES) if cfg.target_mode == "class" else 1
+    num_cross_asset_factors = len(cfg.pairs)
+    if cfg.cross_asset_pca_dim is not None and not 0 < cfg.cross_asset_pca_dim < num_cross_asset_factors:
+        raise ValueError(
+            f"cross_asset_pca_dim={cfg.cross_asset_pca_dim} must be strictly between 0 and "
+            f"len(pairs)={num_cross_asset_factors}"
+        )
     model = LSTMAttentionForecaster(
         num_factors=num_factors,
         output_size=output_size,
+        forecast_horizon=1,
         hidden_size=cfg.hidden_size,
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
+        predict_uncertainty=cfg.predict_uncertainty,
+        use_spectral_features=cfg.use_spectral_features,
+        spectral_embedding_dim=cfg.spectral_embedding_dim,
+        spectral_freq_bins=cfg.spectral_freq_bins,
+        num_cross_asset_factors=num_cross_asset_factors,
+        cross_asset_pca_dim=cfg.cross_asset_pca_dim,
     ).to(cfg.device)
     n_params = sum(p.numel() for p in model.parameters())
     target_desc = f"{len(CLASS_NAMES)}-class direction" if cfg.target_mode == "class" else "z-score regression"
@@ -458,7 +572,13 @@ def save_model(model: LSTMAttentionForecaster, cfg: Config, num_factors: int, pa
         "hidden_size": cfg.hidden_size,
         "num_layers": cfg.num_layers,
         "dropout": cfg.dropout,
+        "predict_uncertainty": cfg.predict_uncertainty,
+        "use_spectral_features": cfg.use_spectral_features,
+        "spectral_embedding_dim": cfg.spectral_embedding_dim,
+        "spectral_freq_bins": cfg.spectral_freq_bins,
+        "cross_asset_pca_dim": cfg.cross_asset_pca_dim,
         "pairs": cfg.pairs,
+        "target_symbol": cfg.target_symbol,
         "horizon": cfg.horizon,
         "seq_len": cfg.seq_len,
         "momentum_window": cfg.momentum_window,
@@ -476,9 +596,16 @@ def load_model(path: str, device: str) -> tuple[LSTMAttentionForecaster, dict]:
     model = LSTMAttentionForecaster(
         num_factors=checkpoint["num_factors"],
         output_size=checkpoint["output_size"],
+        forecast_horizon=1,
         hidden_size=checkpoint["hidden_size"],
         num_layers=checkpoint["num_layers"],
         dropout=checkpoint["dropout"],
+        predict_uncertainty=checkpoint.get("predict_uncertainty", False),
+        use_spectral_features=checkpoint.get("use_spectral_features", False),
+        spectral_embedding_dim=checkpoint.get("spectral_embedding_dim", 8),
+        spectral_freq_bins=checkpoint.get("spectral_freq_bins", 16),
+        num_cross_asset_factors=len(checkpoint["pairs"]),
+        cross_asset_pca_dim=checkpoint.get("cross_asset_pca_dim"),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
     logger.info(
@@ -542,6 +669,11 @@ def variance_penalty(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (pred.std(unbiased=False) - target.std(unbiased=False)) ** 2
 
 
+def gaussian_nll_loss(pred: torch.Tensor, log_variance: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Gaussian negative log likelihood for a mean forecast and conditional uncertainty."""
+    return 0.5 * (torch.exp(-log_variance) * (pred - target).square() + log_variance).mean()
+
+
 def run_epoch(
     model: LSTMAttentionForecaster,
     loader: DataLoader,
@@ -571,14 +703,20 @@ def run_epoch(
         x, y = x.to(cfg.device), y.to(cfg.device)
 
         with torch.set_grad_enabled(is_train):
-            output = model(x)
+            output = model(x, return_uncertainty=cfg.predict_uncertainty and cfg.target_mode == "zscore")
             if cfg.target_mode == "class":
                 loss = ce_loss_fn(output, y)
                 hits = output.argmax(dim=-1) == y
             else:
-                pred = output.squeeze(-1)
-                loss = weighted_mse_loss(pred, y, cfg.outlier_weight)
-                loss = loss + cfg.variance_penalty_weight * variance_penalty(pred, y)
+                if cfg.predict_uncertainty:
+                    mean, log_variance = output
+                    pred = mean.squeeze(-1)
+                    loss = gaussian_nll_loss(pred, log_variance.squeeze(-1), y)
+                else:
+                    pred = output.squeeze(-1)
+                    loss = weighted_mse_loss(pred, y, cfg.outlier_weight)
+                    if cfg.variance_penalty_weight:
+                        loss = loss + cfg.variance_penalty_weight * variance_penalty(pred, y)
                 hits = pred.sign() == y.sign()
 
             if is_train:
@@ -617,6 +755,63 @@ def collect_predictions(
     return actual, predicted
 
 
+def collect_signal(model: LSTMAttentionForecaster, dataset: FXSequenceDataset, cfg: Config) -> np.ndarray:
+    """Risk-adjusted trading signal s_t for every sample in `dataset`, time-ordered — the
+    quantity `fx_forecasting.trading.positions_from_signal` sizes a position from.
+
+    `cfg.predict_uncertainty=False`: the model's predicted return z-score is
+    already risk-adjusted (its target is standardized by trailing realized
+    volatility), so it's used directly as the signal.
+
+    `cfg.predict_uncertainty=True`: divides the model's own predicted mean by
+    its own predicted std (`exp(0.5 * log_variance)`), i.e. s_t = mu_hat/sigma_hat
+    — a low-confidence prediction (wide predicted uncertainty) shrinks the
+    signal even before thresholding/leverage are applied, rather than sizing
+    a position purely off the point estimate.
+    """
+    if cfg.target_mode != "zscore":
+        raise ValueError("collect_signal only supports target_mode='zscore'")
+    loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
+    model.eval()
+    signal_batches = []
+    with torch.no_grad():
+        for x, _y in loader:
+            if cfg.predict_uncertainty:
+                mean, log_variance = model(x.to(cfg.device), return_uncertainty=True)
+                sigma = torch.exp(0.5 * log_variance).clamp_min(1e-3)
+                signal = (mean / sigma).squeeze(-1)
+            else:
+                signal = model(x.to(cfg.device)).squeeze(-1)
+            signal_batches.append(signal.cpu())
+    return torch.cat(signal_batches).numpy()
+
+
+def fit_signal_calibrators(
+    model: LSTMAttentionForecaster, train_datasets: dict[str, FXSequenceDataset], cfg: Config
+) -> dict[str, LinearCalibrator]:
+    """Per symbol, an affine calibration (`fx_forecasting.trading.fit_linear_calibrator`)
+    mapping the model's own raw training-set signal (`collect_signal`) onto what actually
+    realized on the training set — corrects systematic over/under-scaling before the signal is
+    used for position sizing (a raw model output minimizing a training loss has no guarantee of
+    being correctly *scaled* for sizing, only correctly *ordered*). Fit only on the training
+    fold, then reused unchanged for both validation and the final test holdout in
+    `log_and_plot_strategy_pnl`, so no information from either split ever leaks into the
+    calibration itself. No-op (empty dict) outside `target_mode="zscore"`.
+    """
+    if cfg.target_mode != "zscore":
+        return {}
+    calibrators: dict[str, LinearCalibrator] = {}
+    for symbol, dataset in train_datasets.items():
+        actual, _predicted = collect_predictions(model, dataset, cfg)
+        signal = collect_signal(model, dataset, cfg)
+        calibrators[symbol] = fit_linear_calibrator(signal, actual)
+        logger.info(
+            "  %-8s signal calibration: realized ~= %.4f + %.4f * signal", symbol,
+            calibrators[symbol].intercept, calibrators[symbol].slope,
+        )
+    return calibrators
+
+
 # Neutral band, in z-score units, that `compute_hit_rate` counts as a "hit"
 # for a predicted neutral class — the same interior quantile band
 # (`CLASS_QUANTILE_EDGES[2:4]` = 0.3..0.7) that `compute_target_class` itself
@@ -643,8 +838,8 @@ def compute_hit_rate(predicted: np.ndarray, actual_zscore: np.ndarray, target_mo
     `compute_target_class` itself uses for the neutral class). `predicted`
     is still the discrete class index (argmax) in this mode — only the
     "actual" side is judged continuously, via `actual_zscore` (see
-    `build_pooled_datasets`'s `val_zscore_by_symbol`), not the discretized
-    class label.
+    `build_pooled_datasets`'s `market_data_by_symbol["horizon_zscore"]`), not
+    the discretized class label.
 
     This is the metric a trading strategy actually cares about — distinct
     from (and often more informative than) the loss used to train/select the
@@ -664,24 +859,30 @@ def compute_hit_rate(predicted: np.ndarray, actual_zscore: np.ndarray, target_mo
 
 def log_hit_rate_summary(
     model: LSTMAttentionForecaster,
-    val_datasets: dict[str, FXSequenceDataset],
-    val_zscore_by_symbol: dict[str, np.ndarray],
+    datasets: dict[str, FXSequenceDataset],
+    market_data_by_symbol: dict[str, pd.DataFrame],
     cfg: Config,
+    label: str = "validation",
 ) -> None:
     """Logs the hit rate (see `compute_hit_rate`), per symbol and pooled across all of them.
 
-    Compare against `log_naive_baseline`'s baseline accuracy for the real
-    no-skill bar.
+    `datasets` can be any per-symbol `FXSequenceDataset` dict from
+    `build_pooled_datasets` (validation or the final test holdout); `label`
+    is just for the log line. Compare against `log_naive_baseline`'s
+    baseline accuracy for the real no-skill bar.
     """
     if cfg.target_mode == "class":
         metric = "bearish/bullish sign match, neutral band match — see compute_hit_rate"
     else:
         metric = "sign(predicted) == sign(actual)"
-    logger.info("Hit rate (%s):", metric)
+    logger.info("Hit rate (%s, %s):", label, metric)
     all_predicted, all_zscore = [], []
-    for symbol, dataset in val_datasets.items():
+    for symbol, dataset in datasets.items():
         actual, predicted = collect_predictions(model, dataset, cfg)
-        actual_zscore = val_zscore_by_symbol[symbol] if cfg.target_mode == "class" else actual
+        if cfg.target_mode == "class":
+            actual_zscore = market_data_by_symbol[symbol]["horizon_zscore"].reindex(dataset.sample_dates).to_numpy()
+        else:
+            actual_zscore = actual
         hit_rate = compute_hit_rate(predicted, actual_zscore, cfg.target_mode)
         logger.info("  %-8s hit_rate=%5.1f%%  (n=%d)", symbol, hit_rate * 100, len(actual))
         all_predicted.append(predicted)
@@ -690,7 +891,7 @@ def log_hit_rate_summary(
     pooled_hit_rate = compute_hit_rate(np.concatenate(all_predicted), np.concatenate(all_zscore), cfg.target_mode)
     logger.info(
         "  %-8s hit_rate=%5.1f%%  (n=%d, pooled across %d symbols)",
-        "ALL", pooled_hit_rate * 100, sum(len(a) for a in all_predicted), len(val_datasets),
+        "ALL", pooled_hit_rate * 100, sum(len(a) for a in all_predicted), len(datasets),
     )
 
 
@@ -708,150 +909,232 @@ def smooth_weights(weights: np.ndarray, window: int) -> np.ndarray:
     return pd.Series(weights).rolling(window=window, min_periods=1).mean().to_numpy()
 
 
-def compute_strategy_pnl(daily_return: np.ndarray, predicted: np.ndarray) -> np.ndarray:
-    """Per-period PnL of a signal-weighted strategy: position size = predicted z-score.
+def compute_positions_and_pnl(
+    model: LSTMAttentionForecaster,
+    dataset: FXSequenceDataset,
+    symbol: str,
+    market: pd.DataFrame,
+    calibrators: dict[str, LinearCalibrator],
+    cfg: Config,
+) -> tuple[pd.Series, pd.DataFrame]:
+    """The full signal -> calibration -> smoothing -> position-sizing -> net-PnL pipeline for
+    one symbol (shared by `log_and_plot_strategy_pnl` and `plot_positions_and_pnl`) — see
+    `log_and_plot_strategy_pnl`'s docstring for what each stage does and why.
 
-    Position (positive = long, negative = short, magnitude = conviction) is
-    the predicted z-score — expected to already be smoothed via
-    `smooth_weights` before being passed in here. `daily_return` must be a
-    genuinely *daily* (horizon=1) z-scored return, not the model's own
-    N-day-ahead target — that target is an overlapping window (it shares
-    N-1 days with the next day's target), so using it as PnL's per-period
-    "return" leg would double/triple/N-times count the same realized move
-    and make `scale_to_target_vol`'s annualization (which assumes one
-    independent row per trading day) meaningless. `pnl_t = predicted_t *
-    daily_return_t` needs no further scaling, since both are already in the
-    same normalized z-score units. A model that's both correctly directional
-    and well-calibrated in magnitude earns positive expected PnL; pure noise
-    earns ~0 in expectation.
+    Returns `(positions, result)`: `positions` is the raw position-size series (indexed by
+    `dataset.sample_dates`); `result` is `net_strategy_returns`'s per-day
+    turnover/cost/gross/net DataFrame, indexed by whichever of those dates actually had a
+    next-day return to trade against (a subset of `positions`' own index — see
+    `net_strategy_returns`'s `dropna()`).
     """
-    return predicted * daily_return
-
-
-def compute_benchmark_pnl(daily_return: np.ndarray) -> np.ndarray:
-    """Per-period PnL of a naive equal-weight benchmark: unconditional position size of 1
-    (always long), no prediction used — just the daily realized z-score itself as that
-    period's return (see `compute_strategy_pnl` for why this must be daily, not the
-    model's own N-day-ahead target). This is the baseline `compute_strategy_pnl`'s
-    signal-weighted strategy needs to beat to justify using the model's predictions at all.
-    """
-    return daily_return.copy()
-
-
-def scale_to_target_vol(pnl: np.ndarray, target_annual_vol: float = 0.20, periods_per_year: int = 252) -> np.ndarray:
-    """Uniformly rescales `pnl` so its annualized volatility equals `target_annual_vol`.
-
-    Puts return streams that are on different native scales (e.g. an
-    always-long benchmark vs. a signal-weighted strategy whose position size
-    varies with model confidence) onto the same risk footing, so their
-    cumulative PnL shapes are directly comparable — differences reflect
-    skill/shape, not just one strategy running "hotter" than the other.
-    Assumes one row of `pnl` per trading day (252/year); leaves a
-    near-all-zero series unscaled rather than dividing by ~0.
-    """
-    realized_annual_vol = pnl.std(ddof=0) * math.sqrt(periods_per_year)
-    if realized_annual_vol < 1e-12:
-        return pnl
-    return pnl * (target_annual_vol / realized_annual_vol)
+    raw_signal = collect_signal(model, dataset, cfg)
+    calibrated_signal = calibrators[symbol].transform(raw_signal) if symbol in calibrators else raw_signal
+    signal = smooth_weights(calibrated_signal, cfg.horizon)
+    positions = pd.Series(
+        positions_from_signal(signal, cfg.signal_leverage, cfg.signal_threshold, cfg.max_position),
+        index=dataset.sample_dates,
+    )
+    result = net_strategy_returns(positions, market["next_log_return"], market["daily_carry"], cfg.transaction_cost_bps)
+    return positions, result
 
 
 def log_and_plot_strategy_pnl(
     model: LSTMAttentionForecaster,
-    val_datasets: dict[str, FXSequenceDataset],
-    daily_return_by_symbol: dict[str, np.ndarray],
+    datasets: dict[str, FXSequenceDataset],
+    market_data_by_symbol: dict[str, pd.DataFrame],
+    calibrators: dict[str, LinearCalibrator],
     cfg: Config,
+    path: str,
+    sample_label: str = "out-of-sample (validation)",
 ) -> None:
-    """Backtests investing the predicted z-score in each symbol on the validation set.
+    """Execution-aware backtest: an actual, date-aligned, cost-and-carry-aware net PnL, not a
+    z-score-vs-z-score diagnostic.
 
-    Logs per-symbol PnL summary stats for the signal-weighted strategy, then
-    plots: one panel per symbol (raw signal-strategy PnL) plus a final
-    comparison panel overlaying two pooled, equal-weighted-across-symbols
-    portfolios, both rescaled to the same `TARGET_ANNUAL_VOL` (see
-    `scale_to_target_vol`) so their shapes are directly comparable —
-    the naive always-long benchmark (`compute_benchmark_pnl`, no prediction
-    used) vs. the z-score-weighted strategy (`compute_strategy_pnl`). PnL's
-    "return" leg is `daily_return_by_symbol` (see `build_pooled_datasets`),
-    a genuinely daily z-scored return, not the model's own overlapping
-    N-day-ahead target. Only meaningful for `target_mode="zscore"` (a
-    continuous position size); skipped for `target_mode="class"`, where the
-    model has no continuous predicted magnitude to size a position with.
+    Position sizing (`fx_forecasting.trading.positions_from_signal`):
+    `w_t = clip(leverage * s_t, -max_position, max_position) * 1(|s_t| > threshold)`, where
+    `s_t` is the model's own risk-adjusted signal (`collect_signal`), affine-calibrated against
+    what actually realized on the *training* fold only (`calibrators`, see
+    `fit_signal_calibrators` — never re-fit here, so nothing from this split leaks into the
+    calibration), then smoothed over `cfg.horizon` days (`smooth_weights`) to damp the turnover
+    the target's own overlapping-horizon noise would otherwise cause. Below `signal_threshold`
+    the position is flat (0) rather than a small noisy bet — trading only when the model claims
+    enough edge to plausibly clear costs.
+
+    PnL (`fx_forecasting.trading.net_strategy_returns`): `gross_t = w_{t-1} * r_t` using the
+    *actual* next-day executable log return (`market_data_by_symbol[symbol]["next_log_return"]`,
+    not a z-scored proxy), plus `w_{t-1} * carry_t`, minus `cost * |w_t - w_{t-1}|` — so turnover
+    and financing both show up as a real drag rather than being ignored. Per-symbol results are
+    joined by date (`pd.concat(..., axis=1)`), not truncated to the shortest symbol's length, so
+    the pooled portfolio only ever averages days where a symbol actually has a position.
+
+    Only meaningful for `target_mode="zscore"` (a continuous signal to size a position with);
+    skipped for `target_mode="class"`.
+
+    Also writes a `date, symbol, net_cumulative` sidecar CSV next to `path`
+    (same name, `.csv` extension), pooled series included under
+    `symbol="ALL"` — `dashboard.py` reads this for an interactive
+    (zoomable, hoverable) version instead of just embedding this static PNG.
     """
     if cfg.target_mode != "zscore":
         logger.info("Skipping strategy PnL backtest: requires target_mode='zscore' (got %r).", cfg.target_mode)
         return
 
-    TARGET_ANNUAL_VOL = 0.20
-
-    symbols = list(val_datasets.keys())
-    signal_pnl_by_symbol: dict[str, np.ndarray] = {}
-    benchmark_pnl_by_symbol: dict[str, np.ndarray] = {}
+    symbols = list(datasets.keys())
+    net_by_symbol: dict[str, pd.DataFrame] = {}
 
     logger.info(
-        "Strategy backtest (position = %d-day moving average of predicted z-score, realized return = daily z-score):",
-        cfg.horizon,
+        "Execution-aware backtest (%s): leverage=%.2f threshold=%.2f max_position=%.2f cost=%.1fbps:",
+        sample_label, cfg.signal_leverage, cfg.signal_threshold, cfg.max_position, cfg.transaction_cost_bps,
     )
     for symbol in symbols:
-        _target, predicted = collect_predictions(model, val_datasets[symbol], cfg)
-        daily_return = daily_return_by_symbol[symbol]
-        smoothed_predicted = smooth_weights(predicted, cfg.horizon)
-        pnl = compute_strategy_pnl(daily_return, smoothed_predicted)
-        signal_pnl_by_symbol[symbol] = pnl
-        benchmark_pnl_by_symbol[symbol] = compute_benchmark_pnl(daily_return)
-        sharpe = pnl.mean() / (pnl.std() + 1e-12)
+        _positions, result = compute_positions_and_pnl(
+            model, datasets[symbol], symbol, market_data_by_symbol[symbol], calibrators, cfg
+        )
+        net_by_symbol[symbol] = result
+        sharpe = annualized_sharpe(result["net"])
         logger.info(
-            "  %-8s total_pnl=%8.3f  mean_pnl=%+.5f  per-period Sharpe-like=%.3f  (n=%d)",
-            symbol, pnl.sum(), pnl.mean(), sharpe, len(pnl),
+            "  %-8s net_total=%+.4f  net_mean=%+.6f  ann_sharpe=%6.2f  mean_turnover=%.3f  (n=%d)",
+            symbol, result["net"].sum(), result["net"].mean(), sharpe, result["turnover"].mean(), len(result),
         )
 
-    # Equal-weighted pooling across symbols: average PnL at each time step,
-    # truncated to the shortest symbol's validation length (symbols' val
-    # sets differ slightly in length due to per-symbol dropna alignment, not
-    # date-matched — a reasonable approximation, not exact backtesting infra).
-    min_len = min(len(p) for p in signal_pnl_by_symbol.values())
-    pooled_signal_pnl = np.mean([p[:min_len] for p in signal_pnl_by_symbol.values()], axis=0)
-    pooled_benchmark_pnl = np.mean([p[:min_len] for p in benchmark_pnl_by_symbol.values()], axis=0)
-
-    pooled_sharpe = pooled_signal_pnl.mean() / (pooled_signal_pnl.std() + 1e-12)
+    # Date-aligned equal-weight pool: an outer join across symbols' own dates (each symbol's
+    # window can differ slightly), missing days contribute 0 rather than truncating every
+    # symbol down to the shortest one's length.
+    pooled_net = pd.concat({s: r["net"] for s, r in net_by_symbol.items()}, axis=1, sort=True).fillna(0.0).mean(axis=1)
+    pooled_sharpe = annualized_sharpe(pooled_net)
     logger.info(
-        "  %-8s total_pnl=%8.3f  mean_pnl=%+.5f  per-period Sharpe-like=%.3f  (n=%d, equal-weighted across %d symbols)",
-        "ALL", pooled_signal_pnl.sum(), pooled_signal_pnl.mean(), pooled_sharpe, min_len, len(symbols),
-    )
-
-    scaled_signal_pnl = scale_to_target_vol(pooled_signal_pnl, TARGET_ANNUAL_VOL)
-    scaled_benchmark_pnl = scale_to_target_vol(pooled_benchmark_pnl, TARGET_ANNUAL_VOL)
-    logger.info(
-        "  vol-adjusted to %.0f%% annualized: signal total_pnl=%8.3f  equal-weighted-benchmark total_pnl=%8.3f",
-        TARGET_ANNUAL_VOL * 100, scaled_signal_pnl.sum(), scaled_benchmark_pnl.sum(),
+        "  %-8s net_total=%+.4f  net_mean=%+.6f  ann_sharpe=%6.2f  (n=%d, date-aligned equal-weighted across %d symbols)",
+        "ALL", pooled_net.sum(), pooled_net.mean(), pooled_sharpe, len(pooled_net), len(symbols),
     )
 
     fig, axes = plt.subplots(len(symbols) + 1, 1, figsize=(12, 3 * (len(symbols) + 1)), sharex=False, squeeze=False)
 
     for i, symbol in enumerate(symbols):
         ax = axes[i, 0]
-        ax.plot(np.cumsum(signal_pnl_by_symbol[symbol]), linewidth=1.2)
+        result = net_by_symbol[symbol]
+        ax.plot(result.index, result["net"].cumsum(), linewidth=1.2)
         ax.axhline(0.0, color="grey", linewidth=0.5)
-        ax.set_ylabel(f"{symbol}\ncum. PnL")
+        ax.set_ylabel(f"{symbol}\nnet cum. PnL")
 
     ax = axes[-1, 0]
-    ax.plot(
-        np.cumsum(scaled_benchmark_pnl), label="equal-weighted portfolio (no signal)", linewidth=1.5, color="tab:grey"
-    )
-    ax.plot(np.cumsum(scaled_signal_pnl), label="z-score-weighted strategy", linewidth=1.5, color="tab:blue")
+    ax.plot(pooled_net.index, pooled_net.cumsum(), label="pooled net PnL (equal-weighted, cost-aware)", linewidth=1.5, color="tab:blue")
     ax.axhline(0.0, color="grey", linewidth=0.5)
-    ax.set_ylabel(f"Pooled cum. PnL\n(vol-adj. {TARGET_ANNUAL_VOL:.0%})")
+    ax.set_ylabel("Pooled net cum. PnL")
     ax.legend(loc="upper left", fontsize=8)
 
-    axes[-1, 0].set_xlabel(
-        "validation sample (time-ordered, per symbol; pooled panel truncated to shortest symbol)"
-    )
-    fig.suptitle(f"Backtest: cumulative PnL of investing the predicted {cfg.horizon}-day return z-score per symbol")
+    axes[-1, 0].set_xlabel(f"{sample_label} date")
+    fig.suptitle(f"Execution-aware backtest ({sample_label}): net PnL after transaction costs and carry")
     fig.tight_layout()
 
-    path = Path(cfg.pnl_plot_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=150)
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path_obj, dpi=150)
     plt.close(fig)
-    logger.info("Saved strategy PnL plot to %s", path)
+    logger.info("Saved %s strategy PnL plot to %s", sample_label, path_obj)
+
+    csv_rows = [
+        pd.DataFrame({"date": r.index, "symbol": symbol, "net_cumulative": r["net"].cumsum().to_numpy()})
+        for symbol, r in net_by_symbol.items()
+    ]
+    csv_rows.append(pd.DataFrame({"date": pooled_net.index, "symbol": "ALL", "net_cumulative": pooled_net.cumsum().to_numpy()}))
+    csv_path = path_obj.with_suffix(".csv")
+    pd.concat(csv_rows, ignore_index=True).to_csv(csv_path, index=False)
+    logger.info("Saved %s strategy PnL data to %s", sample_label, csv_path)
+
+
+def plot_positions_and_pnl(
+    model: LSTMAttentionForecaster,
+    datasets: dict[str, FXSequenceDataset],
+    market_data_by_symbol: dict[str, pd.DataFrame],
+    calibrators: dict[str, LinearCalibrator],
+    cfg: Config,
+    path: str,
+    sample_label: str = "out-of-sample (validation)",
+) -> None:
+    """One panel per symbol (all of `datasets` — just the target symbol under
+    `cfg.target_symbol`, every pooled symbol otherwise): the position size and that symbol's
+    own actual daily return on the left axis, cumulative PnL with and without transaction
+    costs on a secondary (right) axis.
+
+    Position and daily return share the left axis (both live on comparable, small
+    magnitudes) so their relationship is directly visible — does the model's position track
+    the sign of what actually happens next. The two PnL curves isolate exactly what
+    transaction costs are doing to the strategy: "PnL (no transaction costs)" is
+    `net + cost` (i.e. `gross + position * carry`, `net_strategy_returns`'s own `net` before
+    its `cost` term is subtracted back out — carry is kept in both curves, since it isn't a
+    transaction cost), so the gap between the two curves at any point is exactly the
+    cumulative cost paid for turnover up to then.
+
+    Shares `compute_positions_and_pnl` with `log_and_plot_strategy_pnl` — same signal,
+    calibration, smoothing, and position sizing, so this is a detail view of the same
+    backtest, not a separate one. Only meaningful for `target_mode="zscore"`; skipped for
+    `target_mode="class"`.
+
+    Also writes a `date, symbol, position, daily_return, pnl_with_costs, pnl_without_costs`
+    sidecar CSV next to `path` (same name, `.csv` extension) — `dashboard.py` reads this for
+    an interactive version instead of just embedding this static PNG.
+    """
+    if cfg.target_mode != "zscore":
+        logger.info("Skipping positions/PnL plot: requires target_mode='zscore' (got %r).", cfg.target_mode)
+        return
+
+    symbols = list(datasets.keys())
+    fig, axes = plt.subplots(len(symbols), 1, figsize=(12, 3.5 * len(symbols)), sharex=False, squeeze=False)
+    csv_rows = []
+
+    for i, symbol in enumerate(symbols):
+        positions, result = compute_positions_and_pnl(
+            model, datasets[symbol], symbol, market_data_by_symbol[symbol], calibrators, cfg
+        )
+        aligned_positions = positions.reindex(result.index)
+        daily_return = market_data_by_symbol[symbol]["next_log_return"].reindex(result.index)
+        pnl_with_costs = result["net"].cumsum()
+        pnl_without_costs = (result["net"] + result["cost"]).cumsum()
+
+        ax = axes[i, 0]
+        ax.plot(result.index, aligned_positions, label="position", color="tab:blue", drawstyle="steps-post", linewidth=1.1)
+        ax.plot(result.index, daily_return, label="daily return", color="tab:grey", linewidth=0.8, alpha=0.8)
+        ax.axhline(0.0, color="grey", linewidth=0.5)
+        ax.set_ylabel(f"{symbol}\nposition / daily return")
+
+        ax2 = ax.twinx()
+        ax2.plot(result.index, pnl_with_costs, label="PnL (with transaction costs)", color="tab:green", linewidth=1.4)
+        ax2.plot(
+            result.index, pnl_without_costs, label="PnL (no transaction costs)",
+            color="tab:orange", linewidth=1.4, linestyle="--",
+        )
+        ax2.set_ylabel("cum. PnL")
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=8)
+
+        csv_rows.append(
+            pd.DataFrame(
+                {
+                    "date": result.index,
+                    "symbol": symbol,
+                    "position": aligned_positions.to_numpy(),
+                    "daily_return": daily_return.to_numpy(),
+                    "pnl_with_costs": pnl_with_costs.to_numpy(),
+                    "pnl_without_costs": pnl_without_costs.to_numpy(),
+                }
+            )
+        )
+
+    axes[-1, 0].set_xlabel(f"{sample_label} date")
+    fig.suptitle(f"Positions & PnL ({sample_label}): position vs. daily return; cumulative PnL with/without transaction costs")
+    fig.tight_layout()
+
+    path_obj = Path(path)
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path_obj, dpi=150)
+    plt.close(fig)
+    logger.info("Saved %s positions/PnL plot to %s", sample_label, path_obj)
+
+    csv_path = path_obj.with_suffix(".csv")
+    pd.concat(csv_rows, ignore_index=True).to_csv(csv_path, index=False)
+    logger.info("Saved %s positions/PnL data to %s", sample_label, csv_path)
 
 
 def collect_targets(dataset: Dataset) -> np.ndarray:
@@ -952,12 +1235,24 @@ def plot_predictions_grid(
     the two is the real test of whether the pooled/shared model learned
     generic FX distributional dynamics or just memorized the training set
     (in-sample looking much better than out-of-sample is the overfitting tell).
+
+    Also writes a `date, symbol, actual, predicted` sidecar CSV next to `path`
+    (same name, `.csv` extension) with the exact data the plot was built
+    from, real dates via `FXSequenceDataset.sample_dates` — `dashboard.py`
+    reads this to render an interactive (zoomable, hoverable) version instead
+    of just embedding this static PNG.
     """
     symbols = list(datasets.keys())
     fig, axes = plt.subplots(len(symbols), 1, figsize=(12, 3 * len(symbols)), sharex=False, squeeze=False)
+    csv_rows = []
 
     for i, symbol in enumerate(symbols):
         actual, predicted = collect_predictions(model, datasets[symbol], cfg)
+        csv_rows.append(
+            pd.DataFrame(
+                {"date": datasets[symbol].sample_dates, "symbol": symbol, "actual": actual, "predicted": predicted}
+            )
+        )
         ax = axes[i, 0]
         ax.plot(actual, label="actual", linewidth=1.0, marker=".", markersize=3)
         ax.plot(predicted, label="predicted", linewidth=1.0, alpha=0.8, marker=".", markersize=3)
@@ -985,6 +1280,10 @@ def plot_predictions_grid(
     fig.savefig(path_obj, dpi=150)
     plt.close(fig)
     logger.info("Saved %s prediction plot to %s", sample_label, path_obj)
+
+    csv_path = path_obj.with_suffix(".csv")
+    pd.concat(csv_rows, ignore_index=True).to_csv(csv_path, index=False)
+    logger.info("Saved %s prediction data to %s", sample_label, csv_path)
 
 
 def train(model: LSTMAttentionForecaster, train_ds: ConcatDataset, val_ds: ConcatDataset, cfg: Config) -> float:
@@ -1063,13 +1362,20 @@ def build_parser() -> argparse.ArgumentParser:
     introspect the full set of available parameters without duplicating this list."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pairs", nargs="+", default=list(SINGLE_FX_PAIRS.keys()))
+    parser.add_argument(
+        "--target-symbol",
+        default=None,
+        help="If set, forecast only this one pair (must be one of --pairs); --pairs still "
+        "supplies the input universe (cross-asset returns, carry, CMA, ...). Default: pool "
+        "every --pairs symbol, each forecasting its own target.",
+    )
     parser.add_argument("--years", type=int, default=20)
     parser.add_argument("--seq-len", type=int, default=60)
     parser.add_argument("--horizon", type=int, default=5, help="N days ahead for the cumulative-return target.")
     parser.add_argument(
         "--target-mode",
         choices=["zscore", "class"],
-        default="class",
+        default="zscore",
         help="Regression target: continuous return z-score (default) or 5-class direction label.",
     )
     parser.add_argument("--momentum-window", type=int, default=15)
@@ -1102,6 +1408,69 @@ def build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="target_mode='zscore' only: weight on (pred.std()-target.std())**2, to counteract collapse to a constant near-zero prediction. 0 disables.",
     )
+    parser.add_argument(
+        "--val-fraction",
+        type=float,
+        default=0.2,
+        help="Fraction of each symbol's history used for validation (early stopping, tuning).",
+    )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.1,
+        help="Fraction of each symbol's history held out as a final, untouched test set (evaluated once, after tuning).",
+    )
+    parser.add_argument(
+        "--no-predict-uncertainty",
+        dest="predict_uncertainty",
+        action="store_false",
+        default=True,
+        help="target_mode='zscore' only: disable the mean+log-variance head and Gaussian NLL loss, falling back to plain (weighted) MSE.",
+    )
+    parser.add_argument(
+        "--use-spectral-features",
+        action="store_true",
+        help="Append a learned FFT-magnitude-spectrum embedding of the input window as one extra "
+        "attendable key for the decoder's attention (see fx_forecasting.models.spectral_embedding).",
+    )
+    parser.add_argument(
+        "--spectral-embedding-dim", type=int, default=8,
+        help="Width of the spectral embedding (only used if --use-spectral-features).",
+    )
+    parser.add_argument(
+        "--spectral-freq-bins", type=int, default=16,
+        help="Number of pooled FFT frequency bins fed into the spectral embedding (only used if --use-spectral-features).",
+    )
+    parser.add_argument(
+        "--cross-asset-pca-dim", type=int, default=None,
+        help="If set, reduce the len(--pairs) cross-asset xret_* input columns to this many "
+        "learned, PCA-like linear factors before the encoder sees them (must be strictly "
+        "between 0 and len(--pairs); see fx_forecasting.models.cross_asset_projection).",
+    )
+    parser.add_argument(
+        "--transaction-cost-bps",
+        type=float,
+        default=1.0,
+        help="Strategy backtest: round-trip transaction cost, in basis points of turnover (|position change|).",
+    )
+    parser.add_argument(
+        "--signal-threshold",
+        type=float,
+        default=0.10,
+        help="Strategy backtest: minimum |risk-adjusted signal| to take a position at all; smaller signals trade flat.",
+    )
+    parser.add_argument(
+        "--signal-leverage",
+        type=float,
+        default=0.50,
+        help="Strategy backtest: position size = leverage * signal, before capping at --max-position.",
+    )
+    parser.add_argument(
+        "--max-position",
+        type=float,
+        default=1.0,
+        help="Strategy backtest: maximum absolute position size (post-leverage, pre-cap signal is clipped to this).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--plot-path", default="artifacts/lstm_predictions.png",
@@ -1113,9 +1482,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where to save the in-sample (training) predictions plot.",
     )
     parser.add_argument(
+        "--test-plot-path",
+        default="artifacts/lstm_predictions_test.png",
+        help="Where to save the final holdout (test) predictions plot.",
+    )
+    parser.add_argument(
         "--pnl-plot-path",
         default="artifacts/lstm_pnl.png",
-        help="Where to save the strategy backtest cumulative-PnL plot (target_mode='zscore' only).",
+        help="Where to save the validation strategy backtest cumulative-PnL plot (target_mode='zscore' only).",
+    )
+    parser.add_argument(
+        "--test-pnl-plot-path",
+        default="artifacts/lstm_pnl_test.png",
+        help="Where to save the final holdout (test) strategy backtest cumulative-PnL plot (target_mode='zscore' only).",
+    )
+    parser.add_argument(
+        "--positions-pnl-plot-path",
+        default="artifacts/lstm_positions_pnl.png",
+        help="Where to save the validation position/return/PnL-with-and-without-costs detail plot (target_mode='zscore' only).",
+    )
+    parser.add_argument(
+        "--test-positions-pnl-plot-path",
+        default="artifacts/lstm_positions_pnl_test.png",
+        help="Where to save the final holdout (test) position/return/PnL-with-and-without-costs detail plot (target_mode='zscore' only).",
     )
     parser.add_argument(
         "--model-path",
@@ -1168,6 +1557,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     cfg = Config(
         pairs=args.pairs,
+        target_symbol=args.target_symbol,
         years=args.years,
         seq_len=args.seq_len,
         horizon=args.horizon,
@@ -1187,10 +1577,25 @@ def parse_args(argv: list[str] | None = None) -> Config:
         early_stop_patience=args.early_stop_patience,
         outlier_weight=args.outlier_weight,
         variance_penalty_weight=args.variance_penalty_weight,
+        val_fraction=args.val_fraction,
+        test_fraction=args.test_fraction,
+        predict_uncertainty=args.predict_uncertainty,
+        use_spectral_features=args.use_spectral_features,
+        spectral_embedding_dim=args.spectral_embedding_dim,
+        spectral_freq_bins=args.spectral_freq_bins,
+        cross_asset_pca_dim=args.cross_asset_pca_dim,
+        transaction_cost_bps=args.transaction_cost_bps,
+        signal_threshold=args.signal_threshold,
+        signal_leverage=args.signal_leverage,
+        max_position=args.max_position,
         seed=args.seed,
         plot_path=args.plot_path,
         in_sample_plot_path=args.in_sample_plot_path,
+        test_plot_path=args.test_plot_path,
         pnl_plot_path=args.pnl_plot_path,
+        test_pnl_plot_path=args.test_pnl_plot_path,
+        positions_pnl_plot_path=args.positions_pnl_plot_path,
+        test_positions_pnl_plot_path=args.test_positions_pnl_plot_path,
         model_path=args.model_path,
         features_csv_path=args.features_csv_path,
         infer=args.infer,
@@ -1214,10 +1619,11 @@ def main(argv: list[str] | None = None) -> None:
     (
         train_ds,
         val_ds,
+        test_ds,
         train_datasets_by_symbol,
         val_datasets_by_symbol,
-        daily_return_by_symbol,
-        val_zscore_by_symbol,
+        test_datasets_by_symbol,
+        market_data_by_symbol,
         num_factors,
     ) = build_pooled_datasets(cfg)
 
@@ -1233,17 +1639,48 @@ def main(argv: list[str] | None = None) -> None:
                 f"Checkpoint was trained with target_mode={checkpoint['target_mode']!r} but "
                 f"--target-mode={cfg.target_mode!r} was given; use the same --target-mode as training."
             )
+        if checkpoint.get("target_symbol") != cfg.target_symbol:
+            raise ValueError(
+                f"Checkpoint was trained with target_symbol={checkpoint.get('target_symbol')!r} but "
+                f"--target-symbol={cfg.target_symbol!r} was given; use the same --target-symbol as training "
+                f"(a mismatch wouldn't be caught by the factor-count check above, since the input universe "
+                f"can stay identical while the forecast target changes)."
+            )
     else:
         model = build_model(cfg, num_factors)
         train(model, train_ds, val_ds, cfg)
         save_model(model, cfg, num_factors, cfg.model_path)
 
+    calibrators = fit_signal_calibrators(model, train_datasets_by_symbol, cfg)
+
     plot_predictions_grid(model, val_datasets_by_symbol, cfg, cfg.plot_path, sample_label="out-of-sample (validation)")
     plot_predictions_grid(
         model, train_datasets_by_symbol, cfg, cfg.in_sample_plot_path, sample_label="in-sample (training)"
     )
-    log_hit_rate_summary(model, val_datasets_by_symbol, val_zscore_by_symbol, cfg)
-    log_and_plot_strategy_pnl(model, val_datasets_by_symbol, daily_return_by_symbol, cfg)
+    log_hit_rate_summary(model, val_datasets_by_symbol, market_data_by_symbol, cfg, label="validation")
+    log_and_plot_strategy_pnl(
+        model, val_datasets_by_symbol, market_data_by_symbol, calibrators, cfg, cfg.pnl_plot_path,
+        sample_label="out-of-sample (validation)",
+    )
+    plot_positions_and_pnl(
+        model, val_datasets_by_symbol, market_data_by_symbol, calibrators, cfg, cfg.positions_pnl_plot_path,
+        sample_label="out-of-sample (validation)",
+    )
+
+    logger.info("=" * 70)
+    logger.info(
+        "FINAL HOLDOUT (test set): evaluate once — never used for early stopping, tuning, or model selection."
+    )
+    plot_predictions_grid(model, test_datasets_by_symbol, cfg, cfg.test_plot_path, sample_label="held-out test")
+    log_hit_rate_summary(model, test_datasets_by_symbol, market_data_by_symbol, cfg, label="TEST (final holdout)")
+    log_and_plot_strategy_pnl(
+        model, test_datasets_by_symbol, market_data_by_symbol, calibrators, cfg, cfg.test_pnl_plot_path,
+        sample_label="held-out test",
+    )
+    plot_positions_and_pnl(
+        model, test_datasets_by_symbol, market_data_by_symbol, calibrators, cfg, cfg.test_positions_pnl_plot_path,
+        sample_label="held-out test",
+    )
 
 
 if __name__ == "__main__":

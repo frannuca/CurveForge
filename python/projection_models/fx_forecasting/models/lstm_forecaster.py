@@ -21,6 +21,9 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from fx_forecasting.models.cross_asset_projection import CrossAssetFactorProjection
+from fx_forecasting.models.spectral_embedding import SpectralEmbedding
+
 
 class AttentionPool(nn.Module):
     """Additive (Bahdanau-style) attention: scores every encoder state against a query,
@@ -74,6 +77,24 @@ class LSTMAttentionForecaster(nn.Module):
     linear projection) when `output_size == 1` (continuous regression) — the
     standard way to feed a discrete vs. continuous decoder output back in as
     the next step's input.
+
+    `use_spectral_features=True` additionally runs the (possibly cross-asset-reduced, see
+    below) input through a `SpectralEmbedding` (a small learned projection of the input
+    window's own FFT magnitude spectrum) and appends it, projected to `hidden_size`, as one
+    extra attendable "key" after the encoder's own `seq_len` states — the decoder's
+    attention can then choose to draw on this frequency-domain summary at each step,
+    without the encoder's own LSTM recurrence ever seeing it — see
+    `fx_forecasting.models.spectral_embedding`.
+
+    `cross_asset_pca_dim=D` (requires `num_cross_asset_factors=K>D`) additionally runs the
+    *trailing* `K` columns of `x` — by convention, `main_lstm.py::build_pooled_datasets`
+    always places the per-pair `xret_*` cross-asset-return columns last — through a learned,
+    PCA-like linear bottleneck (`CrossAssetFactorProjection`) before anything else touches
+    `x`: the raw K (often highly collinear) per-pair returns become D learned combinations
+    of them, applied identically at every timestep, shrinking the effective input width the
+    encoder (and, if enabled, the spectral embedding) actually sees from
+    `num_factors` to `num_factors - K + D` — see
+    `fx_forecasting.models.cross_asset_projection`.
     """
 
     def __init__(
@@ -84,6 +105,12 @@ class LSTMAttentionForecaster(nn.Module):
         hidden_size: int = 128,
         num_layers: int = 2,
         dropout: float = 0.1,
+        predict_uncertainty: bool = False,
+        use_spectral_features: bool = False,
+        spectral_embedding_dim: int = 8,
+        spectral_freq_bins: int = 16,
+        num_cross_asset_factors: int = 0,
+        cross_asset_pca_dim: int | None = None,
     ) -> None:
         super().__init__()
         if output_size < 1:
@@ -97,9 +124,45 @@ class LSTMAttentionForecaster(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.is_classification = output_size > 1
+        self.predict_uncertainty = predict_uncertainty and not self.is_classification
+        self.use_spectral_features = use_spectral_features
+        self.num_cross_asset_factors = num_cross_asset_factors
+        self.cross_asset_pca_dim = cross_asset_pca_dim
+
+        # Optional learned linear bottleneck over the trailing `num_cross_asset_factors`
+        # columns of `x` (the per-pair xret_* cross-asset returns) — reduces K collinear
+        # raw returns to D learned combinations before anything else (encoder, spectral
+        # embedding) sees them. See `encode`.
+        self.cross_asset_proj = (
+            CrossAssetFactorProjection(num_cross_asset_factors, cross_asset_pca_dim)
+            if cross_asset_pca_dim is not None
+            else None
+        )
+        effective_num_factors = (
+            num_factors - num_cross_asset_factors + cross_asset_pca_dim
+            if self.cross_asset_proj is not None
+            else num_factors
+        )
+
+        # Optional frequency-domain summary of the input window (see
+        # `SpectralEmbedding`), projected to hidden_size and appended as one extra
+        # attendable key after the encoder runs (see `encode`) — the encoder's own
+        # LSTM recurrence never sees it, only the decoder's attention does, so it
+        # can learn to draw on periodic/cyclical structure at each decoding step
+        # without that structure ever influencing how the encoder reads the raw
+        # time-domain input. Operates on the same (possibly cross-asset-reduced)
+        # representation the encoder does, not the original raw `x`.
+        self.spectral = (
+            SpectralEmbedding(effective_num_factors, spectral_freq_bins, spectral_embedding_dim)
+            if use_spectral_features
+            else None
+        )
+        self.spectral_key_proj = (
+            nn.Linear(spectral_embedding_dim, hidden_size) if use_spectral_features else None
+        )
 
         self.encoder = nn.LSTM(
-            input_size=num_factors,
+            input_size=effective_num_factors,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -117,9 +180,17 @@ class LSTMAttentionForecaster(nn.Module):
         self.decoder_cell = nn.LSTMCell(hidden_size * 2, hidden_size)
         self.dropout = nn.Dropout(dropout)
         self.output_layer = nn.Linear(hidden_size * 2, output_size)
+        self.log_variance_layer = nn.Linear(hidden_size * 2, 1) if self.predict_uncertainty else None
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        if self.cross_asset_proj is not None:
+            k = self.num_cross_asset_factors
+            base, xret = x[..., :-k], x[..., -k:]
+            x = torch.cat([base, self.cross_asset_proj(xret)], dim=-1)
         encoder_outputs, (h_n, c_n) = self.encoder(x)
+        if self.spectral is not None:
+            spectral_key = self.spectral_key_proj(self.spectral(x)).unsqueeze(1)  # (batch, 1, hidden_size)
+            encoder_outputs = torch.cat([encoder_outputs, spectral_key], dim=1)  # one extra attendable key
         return encoder_outputs, h_n[-1], c_n[-1]
 
     def forward(
@@ -127,7 +198,8 @@ class LSTMAttentionForecaster(nn.Module):
         x: Tensor,
         targets: Tensor | None = None,
         teacher_forcing_ratio: float = 0.5,
-    ) -> Tensor:
+        return_uncertainty: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         """
         Args:
             x: normalized multifactor input sequence, shape (batch, seq_len, num_factors).
@@ -149,13 +221,19 @@ class LSTMAttentionForecaster(nn.Module):
         prev_embed = self.start_token.unsqueeze(0).expand(batch_size, -1)
 
         step_outputs = []
+        step_log_variances = []
         for t in range(self.forecast_horizon):
             context, _ = self.attention_pool(dec_h, encoder_outputs)
             decoder_input = torch.cat([prev_embed, context], dim=-1)
             dec_h, dec_c = self.decoder_cell(decoder_input, (dec_h, dec_c))
 
-            step_out = self.output_layer(torch.cat([self.dropout(dec_h), context], dim=-1))
+            output_features = torch.cat([self.dropout(dec_h), context], dim=-1)
+            step_out = self.output_layer(output_features)
             step_outputs.append(step_out)
+            if self.log_variance_layer is not None:
+                # Clamping prevents numerical overflow in the Gaussian NLL while
+                # still allowing the model to express a wide range of uncertainty.
+                step_log_variances.append(self.log_variance_layer(output_features).clamp(-8.0, 5.0))
 
             use_teacher_forcing = (
                 targets is not None
@@ -170,4 +248,11 @@ class LSTMAttentionForecaster(nn.Module):
                 prev_embed = self.value_embedding(next_value.unsqueeze(-1))
 
         result = torch.stack(step_outputs, dim=1)  # (batch, forecast_horizon, output_size)
-        return result.squeeze(1) if self.forecast_horizon == 1 else result
+        result = result.squeeze(1) if self.forecast_horizon == 1 else result
+        if not return_uncertainty:
+            return result
+        if not step_log_variances:
+            raise ValueError("return_uncertainty=True requires predict_uncertainty=True regression model")
+        log_variance = torch.stack(step_log_variances, dim=1)
+        log_variance = log_variance.squeeze(1) if self.forecast_horizon == 1 else log_variance
+        return result, log_variance

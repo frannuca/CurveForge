@@ -173,6 +173,7 @@ def build_symbol_frame(
     vol_window: int,
     carry: pd.Series | None = None,
     cma: pd.DataFrame | None = None,
+    extra_features: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """One symbol's own raw (pre-normalization) feature block: return, intraday_vol,
     momentum, rvol, skew, kurt[, carry][, cma...]."""
@@ -189,6 +190,8 @@ def build_symbol_frame(
     frame = pd.DataFrame(columns).dropna(how="any")
     if cma is not None:
         frame = pd.concat([frame, cma], axis=1).dropna(how="any")
+    if extra_features is not None:
+        frame = pd.concat([frame, extra_features], axis=1).dropna(how="any")
     return frame
 
 
