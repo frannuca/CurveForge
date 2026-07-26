@@ -248,7 +248,9 @@ script default.
 
 Runs execute in a background thread (training/search can take a while) so
 the page stays responsive; a log panel and a progress bar update live while
-a run is in progress, and:
+a run is in progress. The log panel auto-scrolls to follow new lines as long
+as you're already at the bottom; scroll up to read earlier output and it
+stops following until you scroll back down. And:
 
 - **Train / Evaluate** shows the out-of-sample and in-sample predictions
   plots and the strategy PnL plot once training finishes.

@@ -651,6 +651,47 @@ register_poll_callback("train", render_train_artifacts, train_progress)
 register_poll_callback("optimize", render_optimize_artifacts, optimize_progress)
 
 
+def register_autoscroll_callback(mode: str) -> None:
+    """Client-side only (no server round-trip): keeps the log panel scrolled to its latest
+    line as new lines arrive from `on_tick`, but only while the user hasn't scrolled up to
+    read earlier output.
+
+    A `scroll` listener, attached once per panel, continuously tracks whether it's currently
+    "pinned" to the bottom (within a small pixel tolerance, since exact equality is unreliable
+    across browsers/zoom levels). Each time new log content lands (`children` changes — this
+    fires after Dash has already applied it to the DOM), the panel is force-scrolled back to
+    its new bottom only if it was already pinned there when the update arrived; otherwise the
+    user's own scroll position is left untouched. Writes to the otherwise-unused `title` prop
+    only because every Dash callback needs an Output — the actual effect is the DOM scroll.
+    """
+    app.clientside_callback(
+        f"""
+        function(children) {{
+            const el = document.getElementById('{mode}-log');
+            if (!el) {{ return window.dash_clientside.no_update; }}
+            if (!el._autoscrollBound) {{
+                el._pinnedToBottom = true;
+                el.addEventListener('scroll', function () {{
+                    const threshold = 4;
+                    el._pinnedToBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+                }});
+                el._autoscrollBound = true;
+            }}
+            if (el._pinnedToBottom) {{
+                el.scrollTop = el.scrollHeight;
+            }}
+            return window.dash_clientside.no_update;
+        }}
+        """,
+        Output(f"{mode}-log", "title"),
+        Input(f"{mode}-log", "children"),
+    )
+
+
+register_autoscroll_callback("train")
+register_autoscroll_callback("optimize")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app.run(debug=False, host="127.0.0.1", port=8050)
