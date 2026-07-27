@@ -78,6 +78,36 @@ def compute_engineered_features(
     return engineered
 
 
+def compute_volatility_regime(returns: pd.Series, vol_window: int, regime_window: int, n_regimes: int = 3) -> pd.Series:
+    """Causal realized-volatility regime label for `returns`: `vol_window`-day trailing
+    realized vol, ranked (percentile) against *all* its own history up to and including that
+    day — not just a fixed trailing window — bucketed into `n_regimes` equal-frequency
+    regimes (0=lowest-vol regime .. n_regimes-1=highest-vol regime). `regime_window` is the
+    minimum history (in days) required before a regime label is assigned at all (an
+    expanding, not fixed-size, comparison — a *fixed* trailing window loses persistent regime
+    information once the whole window falls inside one regime, e.g. long after a vol
+    step-change, every day in the window looks "normal" relative to its equally-elevated
+    neighbors again).
+
+    Volatility clustering/regime-switching is one of the best-documented features of
+    financial return series (Engle, 1982, "Autoregressive Conditional Heteroscedasticity";
+    Hamilton, 1989, regime-switching models) — used here purely descriptively, to test
+    whether a model's predictive accuracy is concentrated in a particular volatility regime
+    rather than uniform across all conditions, before building any trading logic around that
+    hypothesis. `returns` can be a single symbol's own daily log return (an idiosyncratic
+    regime) or a cross-sectional summary (e.g. `log_returns[peers].median(axis=1)`, a
+    market-wide risk-on/risk-off proxy) — this function doesn't care which.
+
+    Both `vol_window` (trailing) and the expanding rank are causal by construction — a day's
+    label only ever depends on data up to and including that day, never a future one — the
+    same causality guarantee every other rolling computation in this module makes.
+    """
+    realized_vol = returns.rolling(vol_window).std()
+    pct_rank = realized_vol.expanding(min_periods=regime_window).rank(pct=True)
+    labels = pd.cut(pct_rank, bins=n_regimes, labels=False, include_lowest=True)
+    return pd.Series(labels, index=returns.index, name="vol_regime").dropna().astype("int64")
+
+
 def compute_carry_feature(pairs: list[str], rates: pd.DataFrame) -> pd.DataFrame:
     """Interest-rate carry per pair: base currency's rate minus quote currency's rate.
 
@@ -240,6 +270,15 @@ def compute_target_zscore(
     return pd.Series(z, index=z.index, name=f"cum_return_{horizon}d_zscore")
 
 
+def _zscore_to_quantile(z: pd.Series, horizon: int) -> pd.Series:
+    """Standard-normal-CDF transform of a return z-score into a (0, 1) quantile — 0.5 is the
+    median (no move), values -> 1 are extreme positive, values -> 0 are extreme negative.
+    Shared by `compute_target_quantile` and `compute_cross_sectional_target_quantile`, so
+    both the absolute and relative-to-peers target families bucket into classes identically.
+    """
+    return pd.Series(norm.cdf(z.to_numpy()), index=z.index, name=f"cum_return_{horizon}d_quantile")
+
+
 def compute_target_quantile(
     panel: pd.DataFrame, log_returns: pd.DataFrame, symbol: str, horizon: int, window: int
 ) -> pd.Series:
@@ -248,8 +287,7 @@ def compute_target_quantile(
     returns, values -> 0 are extreme negative returns.
     """
     z = compute_target_zscore(panel, log_returns, symbol, horizon, window)
-    quantile = pd.Series(norm.cdf(z.to_numpy()), index=z.index, name=f"cum_return_{horizon}d_quantile")
-    return quantile
+    return _zscore_to_quantile(z, horizon)
 
 
 # 5-class direction labeling of `compute_target_quantile`'s continuous
@@ -257,9 +295,21 @@ def compute_target_quantile(
 # the most extreme 10% of moves, "bearish"/"bullish" the next 20% on each
 # side, and "neutral" the middle 40% — equivalent to z-score bands of
 # roughly ±1.28σ (very_*) and ±0.52σ (mild) under `compute_target_quantile`'s
-# own normality assumption. Order matches class index 0-4.
+# own normality assumption. Order matches class index 0-4. Reused as-is by the
+# cross-sectional target family (see `compute_cross_sectional_target_class`) —
+# there, "very_bullish" means "very much outperformed peers", not an absolute
+# positive return; the bucket edges/count stay identical either way.
 CLASS_NAMES: tuple[str, ...] = ("very_bearish", "bearish", "neutral", "bullish", "very_bullish")
 CLASS_QUANTILE_EDGES: tuple[float, ...] = (0.0, 0.1, 0.3, 0.7, 0.9, 1.0)
+
+
+def _quantile_to_class(quantile: pd.Series, horizon: int) -> pd.Series:
+    """Buckets a continuous return quantile into 5 discrete classes (see `CLASS_NAMES`),
+    returned as integer labels 0-4 (cut points: `CLASS_QUANTILE_EDGES`). Shared by
+    `compute_target_class` and `compute_cross_sectional_target_class`.
+    """
+    labels = pd.cut(quantile, bins=CLASS_QUANTILE_EDGES, labels=False, include_lowest=True)
+    return pd.Series(labels, index=quantile.index, name=f"cum_return_{horizon}d_class").astype("int64")
 
 
 def compute_target_class(
@@ -272,8 +322,67 @@ def compute_target_class(
     points: `CLASS_QUANTILE_EDGES`).
     """
     quantile = compute_target_quantile(panel, log_returns, symbol, horizon, window)
-    labels = pd.cut(quantile, bins=CLASS_QUANTILE_EDGES, labels=False, include_lowest=True)
-    return pd.Series(labels, index=quantile.index, name=f"cum_return_{horizon}d_class").astype("int64")
+    return _quantile_to_class(quantile, horizon)
+
+
+def compute_cross_sectional_target_zscore(
+    panel: pd.DataFrame, log_returns: pd.DataFrame, symbol: str, peer_symbols: list[str], horizon: int, window: int
+) -> pd.Series:
+    """The `horizon`-day cumulative return for `symbol` *relative to* the cross-sectional
+    median of `peer_symbols`' own horizon-day cumulative returns over the same window,
+    standardized (z-scored) by the trailing rolling volatility of that relative-return series
+    — "did `symbol` outperform the rest of the traded universe, and by how much in std-dev
+    units", rather than `compute_target_zscore`'s "did `symbol` itself go up".
+
+    `peer_symbols` should exclude `symbol` (the caller's responsibility — with a small
+    universe of, say, 7 pairs, including the target in its own comparison group would let it
+    dominate the very median it's being measured against).
+
+    Otherwise mirrors `compute_target_zscore` exactly, just applied to `symbol`'s cumulative
+    return *minus* the peer median instead of `symbol`'s own absolute cumulative return: the
+    relative-return series' own trailing volatility (not `symbol`'s own absolute volatility)
+    sets the scale, so a symbol that's simply more volatile than its peers isn't automatically
+    flagged as "outperforming/underperforming" more often just because it moves more.
+
+    Cross-sectional (relative-value/rotation) signals are a classical alternative to absolute
+    single-symbol direction forecasting: Gu, Kelly & Xiu (2020, "Empirical Asset Pricing via
+    Machine Learning") and the broader cross-sectional factor literature find relative
+    outperformance often more learnable than absolute direction, since it filters out
+    market-wide (here, broad-USD) moves that hit every pair at once and contribute nothing to
+    telling them apart.
+    """
+    log_price = np.log(panel)
+    cum_return = log_price.shift(-horizon) - log_price
+    peer_median_cum_return = cum_return[peer_symbols].median(axis=1)
+    relative_cum_return = cum_return[symbol] - peer_median_cum_return
+
+    peer_median_daily_return = log_returns[peer_symbols].median(axis=1)
+    relative_daily_return = log_returns[symbol] - peer_median_daily_return
+    rolling_std = relative_daily_return.rolling(window=window).std()
+    scale = (rolling_std * np.sqrt(horizon)).replace(0, np.nan)
+
+    z = (relative_cum_return / scale).dropna()
+    return pd.Series(z, index=z.index, name=f"cum_return_{horizon}d_relative_zscore")
+
+
+def compute_cross_sectional_target_quantile(
+    panel: pd.DataFrame, log_returns: pd.DataFrame, symbol: str, peer_symbols: list[str], horizon: int, window: int
+) -> pd.Series:
+    """`compute_cross_sectional_target_zscore`, passed through the standard normal CDF — see
+    `compute_target_quantile` for what the resulting (0, 1) quantile means."""
+    z = compute_cross_sectional_target_zscore(panel, log_returns, symbol, peer_symbols, horizon, window)
+    return _zscore_to_quantile(z, horizon)
+
+
+def compute_cross_sectional_target_class(
+    panel: pd.DataFrame, log_returns: pd.DataFrame, symbol: str, peer_symbols: list[str], horizon: int, window: int
+) -> pd.Series:
+    """Buckets `compute_cross_sectional_target_quantile` into the same 5 classes
+    `compute_target_class` uses (see `CLASS_NAMES`/`CLASS_QUANTILE_EDGES`), but relative to
+    `peer_symbols` rather than absolute: 0=very much underperformed peers .. 4=very much
+    outperformed peers."""
+    quantile = compute_cross_sectional_target_quantile(panel, log_returns, symbol, peer_symbols, horizon, window)
+    return _quantile_to_class(quantile, horizon)
 
 
 # 3-class direction labeling of `compute_target_quantile`'s continuous

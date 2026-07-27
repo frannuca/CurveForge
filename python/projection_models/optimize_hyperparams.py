@@ -1,6 +1,6 @@
 """Hyperparameter search for the LSTM forecaster via differential evolution.
 
-Searches a configurable list of `Config` parameters (CMA windows, seq_len,
+Searches a configurable list of `Config` parameters (seq_len, momentum/vol windows,
 LSTM architecture, learning rate, regularization, ...) to minimize
 validation loss on a fixed data window, using scipy's `differential_evolution`.
 Each trial trains a small/fast model (few epochs, aggressive early stopping)
@@ -42,7 +42,7 @@ from main_lstm import (
     Config,
     RawPanels,
     build_model,
-    build_pooled_datasets,
+    build_target_dataset,
     load_raw_panels,
     plot_predictions_grid,
     set_seed,
@@ -160,8 +160,11 @@ def run_trial(x: np.ndarray, base_cfg: Config, specs: list[ParamSpec], raw: RawP
             _test_datasets,
             _market_data,
             num_factors,
-        ) = build_pooled_datasets(cfg, raw=raw)
-        model = build_model(cfg, num_factors)
+            num_side_features,
+            num_target_series,
+            _feature_names,
+        ) = build_target_dataset(cfg, raw=raw)
+        model = build_model(cfg, num_factors, num_side_features, num_target_series)
         loss = train(model, train_ds, val_ds, cfg)
         status = "ok"
         maybe_save_best_prediction_plot(cfg, model, val_datasets_by_symbol, loss, status, results_csv)
@@ -200,12 +203,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pairs", nargs="+", default=None, help="Defaults to Config's default pairs.")
     parser.add_argument(
-        "--target-symbol", default=None,
-        help="If set, search for a model forecasting only this one pair (must be one of --pairs); "
-        "--pairs still supplies the input universe. Default: pool every --pairs symbol.",
+        "--target-symbol", required=True,
+        help="The one pair to forecast (must be one of --pairs); --pairs still supplies the "
+        "full cross-asset input universe for the pretrained factor autoencoder.",
+    )
+    parser.add_argument(
+        "--autoencoder-path", required=True,
+        help="Path to a checkpoint written by pretrain_autoencoder.py for this exact --pairs "
+        "and every seq_len the search will try (a seq_len mismatch fails that trial, scored "
+        "as FAILED_TRIAL_PENALTY, unless seq_len is excluded from --params).",
     )
     parser.add_argument("--years", type=int, default=10, help="Data window to optimize over.")
     parser.add_argument("--target-mode", choices=["zscore", "class"], default="zscore")
+    parser.add_argument(
+        "--cross-sectional-target", action="store_true",
+        help="Search for a model predicting target_symbol's return relative to the cross-"
+        "sectional median of the other --pairs symbols, instead of its own absolute direction.",
+    )
     parser.add_argument(
         "--params", nargs="+", default=None,
         help="Subset of DEFAULT_PARAM_SPECS names to search (default: all of them).",
@@ -252,8 +266,10 @@ def main(argv: list[str] | None = None) -> None:
     base_cfg = Config(
         pairs=args.pairs or Config().pairs,
         target_symbol=args.target_symbol,
+        autoencoder_path=args.autoencoder_path,
         years=args.years,
         target_mode=args.target_mode,
+        cross_sectional_target=args.cross_sectional_target,
         epochs=args.trial_epochs,
         early_stop_patience=args.trial_early_stop_patience,
         write_features_csv=False,

@@ -1,18 +1,34 @@
 # LSTM + Attention forecaster — architecture guide
 
-This explains `lstm_forecaster.py` piece by piece, with line numbers, so you can
-follow the code while reading. All line numbers refer to
-`fx_forecasting/models/lstm_forecaster.py` as of this writing.
+This explains `lstm_forecaster.py` piece by piece, so you can follow the code
+while reading. See also `pretrain_autoencoder.py` and
+`fx_forecasting/models/orthogonal_autoencoder.py` for the pretrained
+cross-asset factor reduction this model depends on.
 
 ## What it does, in one sentence
 
-Given a window of the last `seq_len` days of (normalized) per-symbol FX
-features, an encoder-decoder LSTM with attention forecasts `forecast_horizon`
-steps ahead **recursively** — the classic sequence-to-sequence-with-attention
-design (Sutskever et al., 2014; Bahdanau et al., 2015), adapted for
-continuous or per-class-logit regression instead of token generation. The
-model itself is task-agnostic; `main_lstm.py`'s `Config.target_mode` decides
-what each step's `output_size` values mean:
+The model forecasts one target FX pair. Its recurrent input is a pretrained,
+orthogonally-reduced cross-asset return factor sequence — every pair in the
+input universe's own daily log return (K series, target included) compressed
+down to D orthogonal factors by a linear autoencoder trained separately
+(`pretrain_autoencoder.py`) and loaded frozen (by default) into this model —
+concatenated with the target symbol's own (normalized) log return sequence,
+uncompressed, so the recurrence has undiluted access to the series it's
+actually forecasting on top of the shared cross-asset structure. Everything
+else — momentum, realized vol, skew, kurtosis, carry, intraday volatility,
+and an optional spectral (FFT) summary of the combined sequence — bypasses
+the LSTM/attention recurrence entirely and is injected only at the final
+prediction layer (Lim, Arık, Loeff & Pfister, 2021, "Temporal Fusion
+Transformers": non-sequential covariates are best fed directly to the output
+stage rather than forced through the same recurrent bottleneck as the
+genuine time-varying signal).
+
+An encoder-decoder LSTM with attention then forecasts `forecast_horizon`
+steps ahead **recursively** over that factor sequence — the classic
+sequence-to-sequence-with-attention design (Sutskever et al., 2014; Bahdanau
+et al., 2015), adapted for continuous or per-class-logit regression instead
+of token generation. The model itself is task-agnostic; `main_lstm.py`'s
+`Config.target_mode` decides what each step's `output_size` values mean:
 
 - `target_mode="zscore"` (**default**): `output_size=1`, a single continuous
   value regressing the standardized ("z-scored") `horizon`-day cumulative
@@ -32,10 +48,15 @@ multi-step-ahead forecasting.
 
 ## The shape of the problem
 
-- Input `x`: `(batch, seq_len, num_factors)` — e.g. `seq_len=60` days of
-  history, `num_factors=8` (one symbol's own return, intraday_vol, momentum,
-  rvol, carry, and 3 EWMA-crossover features — see
-  `main_lstm.py::build_pooled_datasets`).
+- Input `x`: `(batch, seq_len, num_factors)`, where `num_factors =
+  num_side_features + num_target_series + num_cross_asset_factors` — three
+  column blocks in that order: the leading `num_side_features` columns are
+  the target symbol's own non-sequential covariates (momentum, rvol, skew,
+  kurt, carry, intraday volatility); the middle `num_target_series` columns
+  are the target symbol's own (normalized) log return sequence; the
+  *trailing* `num_cross_asset_factors` (K) columns are the per-pair `xret_*`
+  cross-asset log returns (including the target's own) — see
+  `main_lstm.py::build_target_dataset`.
 - Output: `(batch, forecast_horizon, output_size)` if `forecast_horizon > 1`,
   else `(batch, output_size)` — `output_size` is `1` (zscore mode) or `5`
   (class mode) in `main_lstm.py::build_model`. No output activation in
@@ -44,42 +65,86 @@ multi-step-ahead forecasting.
   `log_softmax` internally, so pre-squashing the logits (e.g. with a sigmoid
   or ReLU) here would double-apply a nonlinearity and distort the loss.
 
-## Encoder -> recursive attention decoder
+## Cross-asset factor reduction -> encoder -> recursive attention decoder
 
-Unlike a simple encode-then-pool design, this *is* a sequence-to-sequence
-decoder: the decoder unrolls step by step for `forecast_horizon` iterations,
-attending over every encoder timestep afresh at each step and feeding its own
-prediction back in as the next step's input.
+Before the LSTM ever runs, `encode()` splits `x` into its three blocks, reduces the
+cross-asset block through the pretrained orthogonal encoder, and concatenates that with the
+target's own return series:
 
 ```
  x (batch, seq_len, num_factors)
         │
+        │  split: base = x[..., :-(K+T)] (side features),
+        │         target_series = x[..., -(K+T):-K], xret = x[..., -K:]
         ▼
- ┌──────────────┐   encoder_outputs (batch, seq_len, hidden)
- │  ENCODER LSTM │ ─────────────────────────────────────────┐
- │  (nn.LSTM)    │   final (h, c) seed the decoder            │
- └──────────────┘        │                                  │
-                          ▼                                  │
-                 ┌─────────────────┐                         │
-        ┌───────▶│   DECODER LOOP  │◀────────────────────────┘
-        │        │ (runs `forecast_horizon` times)           │
-        │        │                                            │
-        │        │  1. attention_pool(dec_h, encoder_outputs)   │
-        │        │       -> context vector                      │
-        │        │  2. LSTMCell(prev_embed + context)             │
-        │        │       -> new dec_h, dec_c                       │
-        │        │  3. output_layer(dec_h + context)                │
-        │        │       -> this step's raw output                  │
-        └────────┤  4. embed this step's value (or ground truth,       │
-                 │     with teacher forcing) for the next iteration     │
-                 └─────────────────────────────────────────────────────┘
+ xret (batch, seq_len, K) ──▶ cross_asset_encoder (pretrained, orthonormal rows)
+        │                            │
+        │                    factors (batch, seq_len, D)
+        │                            │
+        │      target_series (batch, seq_len, T) ──▶ cat([factors, target_series])
+        │                            │
+        │                    factor_norm (LayerNorm, width D+T)
+        │                            ▼
+        │                   ┌──────────────┐   encoder_outputs (batch, seq_len, hidden)
+        │                   │  ENCODER LSTM │ ─────────────────────────────────────────┐
+        │                   │  (nn.LSTM)    │   final (h, c) seed the decoder            │
+        │                   └──────────────┘        │                                  │
+        │                                            ▼                                  │
+        │                                   ┌─────────────────┐                         │
+        │                          ┌───────▶│   DECODER LOOP  │◀────────────────────────┘
+        │                          │        │ (runs `forecast_horizon` times)           │
+        │                          │        │                                            │
+        │                          │        │  1. attention_pool(dec_h, encoder_outputs)   │
+        │                          │        │       -> context vector                      │
+        │                          │        │  2. LSTMCell(prev_embed + context)             │
+        │                          │        │       -> new dec_h, dec_c                       │
+        │                          │        │  3. output_layer(pre_output_norm([dec_h, context,│
+        │                          │        │       spectral_vec?, side_features_at_t]))        │
+        │                          │        │       -> this step's raw output                  │
+        │                          └────────┤  4. embed this step's value (or ground truth,       │
+        │                                   │     with teacher forcing) for the next iteration     │
+        │                                   └─────────────────────────────────────────────────────┘
+        └──▶ side_features_at_t = base[:, -1, :] (forecast origin's own values) ───────────────────┘
+                (feeds step 3 directly, at every decoding step, unchanged)
 ```
+
+### Cross-asset factor encoder + target series (`self.cross_asset_encoder`)
+
+```python
+self.cross_asset_encoder = OrthogonalAutoencoder(num_cross_asset_factors, factor_dim).encoder
+lstm_input_size = factor_dim + num_target_series
+self.factor_norm = nn.LayerNorm(lstm_input_size)
+```
+
+A linear map (`K -> D`, `D < K`) with rows constrained to stay exactly
+orthonormal throughout training (`torch.nn.utils.parametrizations.orthogonal`
+— Lezcano-Casado & Martínez-Rubio, 2019). Per Baldi & Hornik (1989), a linear
+autoencoder trained by reconstruction MSE recovers the same subspace PCA
+would; the orthonormality constraint makes the individual learned factors
+themselves mutually orthogonal too — a real, gradient-trained analogue of
+PCA (see `fx_forecasting/models/orthogonal_autoencoder.py`), not an arbitrary
+learned linear map. Pretrained by `pretrain_autoencoder.py`; this class only
+owns the architecture — `main_lstm.py::build_model` loads the pretrained
+weights afterward and, by default, freezes them (Kumar et al. 2022: fine-
+tuning a pretrained representation risks distorting it, a real concern under
+FX's non-stationary return distributions).
+
+Since `D < K`, this compression can dilute the target symbol's own
+idiosyncratic dynamics into the shared cross-asset structure. `num_target_series`
+columns of the target's own (normalized) log return are concatenated onto the D
+factors, uncompressed, before the LSTM ever sees either — giving the
+recurrence privileged, undiluted access to the series it's actually
+forecasting, on top of the shared factor structure. `factor_norm` LayerNorms
+the combined `(D + num_target_series)`-dim sequence before the LSTM, since
+the orthogonal map preserves total variance but can redistribute it unevenly
+across the D output dimensions depending on the data's own covariance
+structure.
 
 ### Encoder (`self.encoder`)
 
 ```python
 self.encoder = nn.LSTM(
-    input_size=num_factors,
+    input_size=factor_dim + num_target_series,
     hidden_size=hidden_size,
     num_layers=num_layers,
     batch_first=True,
@@ -87,12 +152,24 @@ self.encoder = nn.LSTM(
 )
 ```
 
-A standard multi-layer LSTM. It reads the whole `(batch, seq_len, num_factors)`
-input and produces `encoder_outputs` (the hidden state at **every** timestep,
-shape `(batch, seq_len, hidden_size)` — what the decoder attends over) plus
-the final layer's last hidden/cell state, which seeds the decoder
-(`encode()` returns `encoder_outputs, h_n[-1], c_n[-1]`). Inherently causal:
-at internal step `t`, the LSTM has only processed inputs `0..t`.
+A standard multi-layer LSTM — but its *entire* input is now the
+`(D + num_target_series)`-dim, LayerNorm'd sequence, never the raw side
+features. It produces `encoder_outputs` (the hidden state at **every**
+timestep, shape `(batch, seq_len, hidden_size)` — what the decoder attends
+over) plus the final layer's last hidden/cell state, which seeds the decoder
+(`encode()` returns `encoder_outputs, h_n[-1], c_n[-1], spectral_vec,
+side_features_at_t`). Inherently causal: at internal step `t`, the LSTM has
+only processed inputs `0..t`.
+
+### Side features and spectral summary (final prediction layer only)
+
+`side_features_at_t = base[:, -1, :]` — the forecast origin's own (last-
+timestep) side-feature values, a static per-window vector, not a sequence.
+If `use_spectral_features=True`, `self.spectral` (a `SpectralEmbedding`) also
+runs on the same combined `(D + num_target_series)`-dim sequence the LSTM
+does, producing another static vector. Both are concatenated directly into
+the decoder's per-step output features (see the decoder loop below) — never
+fed into the recurrence or the attention mechanism itself.
 
 ### Attention (`AttentionPool`)
 
@@ -129,7 +206,12 @@ for t in range(self.forecast_horizon):
     decoder_input = torch.cat([prev_embed, context], dim=-1)          # (2) combine with last value
     dec_h, dec_c = self.decoder_cell(decoder_input, (dec_h, dec_c))   #     advance the decoder LSTM state
 
-    step_out = self.output_layer(torch.cat([self.dropout(dec_h), context], dim=-1))
+    pre_output = [self.dropout(dec_h), context]
+    if spectral_vec is not None:
+        pre_output.append(spectral_vec)
+    pre_output.append(side_features_at_t)
+    output_features = self.pre_output_norm(torch.cat(pre_output, dim=-1))
+    step_out = self.output_layer(output_features)
     step_outputs.append(step_out)                                     # (3) this step's raw output
 
     use_teacher_forcing = targets is not None and self.training and torch.rand(()).item() < teacher_forcing_ratio
@@ -141,8 +223,11 @@ for t in range(self.forecast_horizon):
    which input days matter (`context`).
 2. **Step the LSTM**: feed `[previous value's embedding, attention context]`
    into an `LSTMCell` to get the new decoder state.
-3. **Predict**: combine the (dropout-regularized) decoder state with the
-   attention context, project to `output_size` raw values — this step's output.
+3. **Predict**: concatenate the (dropout-regularized) decoder state, the
+   attention context, the spectral summary (if enabled), and the side
+   features at the forecast origin, LayerNorm the result (`pre_output_norm`
+   — so no one block's raw scale dominates purely from its natural units),
+   then project to `output_size` raw values — this step's output.
 4. **Feed forward**: embed the value just produced (or, during training,
    possibly the ground truth instead — see teacher forcing below) so the
    *next* iteration's decoder input reflects "what happened at step t". On
@@ -168,24 +253,37 @@ Only matters when `forecast_horizon > 1` — with `forecast_horizon=1`
 
 ## Where this is wired up
 
+- `pretrain_autoencoder.py` — trains `OrthogonalAutoencoder(num_cross_asset_factors,
+  factor_dim)` on the input universe's cross-asset log returns, saves its
+  `.encoder` weights (plus `pairs`/`seq_len`) to `--autoencoder-path`.
+- `main_lstm.py::build_target_dataset` — builds `x`'s three column blocks: the
+  target symbol's side features (leading columns), the target symbol's own
+  log return sequence (middle column), and every pair's own `xret_*` log
+  return (trailing K columns).
 - `main_lstm.py::build_model` — constructs the model:
-  `LSTMAttentionForecaster(num_factors=<per-symbol feature count>, output_size=<1 or len(CLASS_NAMES)>, hidden_size=cfg.hidden_size, ...)`,
-  choosing `output_size` from `cfg.target_mode` and leaving `forecast_horizon`
-  at its default of `1`.
+  `LSTMAttentionForecaster(num_factors=<total feature count>,
+  output_size=<1 or len(CLASS_NAMES)>, num_cross_asset_factors=len(cfg.pairs),
+  factor_dim=<from checkpoint>, num_side_features=<computed>,
+  num_target_series=<computed>, hidden_size=cfg.hidden_size, ...)`,
+  then loads the pretrained `--autoencoder-path` checkpoint's weights into
+  `model.cross_asset_encoder` and (by default) freezes them.
 - `main_lstm.py::run_epoch` — calls `model(x)` (no `targets`, so no teacher
   forcing — harmless at `forecast_horizon=1` since there's no next step to
-  feed forward into anyway) and branches on `cfg.target_mode`: weighted
-  `nn.MSELoss`-style loss + squeezed scalar predictions (zscore), or weighted
-  `nn.CrossEntropyLoss` + `argmax` predictions (class).
+  feed forward into anyway) and branches on `cfg.target_mode`: weighted MSE
+  (+ variance penalty, active by default — see `variance_penalty`) + squeezed
+  scalar predictions (zscore), or weighted `nn.CrossEntropyLoss` + `argmax`
+  predictions (class).
 - `main_lstm.py::collect_predictions` — same `model(x)` call, mode-aware
   post-processing, used to build the actual-vs-predicted plots and hit-rate
   summary.
 
 ## Quick mental model
 
-Think of it as: *"Read the last 60 days of one symbol's market data
-(encoder). Then, for each future step you need to forecast, look back at
-whichever of those 60 days seem most relevant right now (attention), turn
-that into a number or class (decoder), and carry that forward into the next
-step."* With `forecast_horizon=1` (this project's current usage) that loop
-only ever runs once.
+Think of it as: *"Reduce the last 60 days of the whole FX universe's returns
+to a handful of orthogonal factors (pretrained autoencoder). Read those
+factors (encoder). Then, for each future step you need to forecast, look
+back at whichever of those days seem most relevant right now (attention),
+combine that with the target symbol's own momentum/vol/carry/etc. at today
+(side features), turn that into a number or class (decoder), and carry that
+forward into the next step."* With `forecast_horizon=1` (this project's
+current usage) that loop only ever runs once.

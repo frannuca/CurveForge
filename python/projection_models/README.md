@@ -1,19 +1,29 @@
 # FX Forecasting
 
-LSTM forecasters for FX pairs. Four entry points:
+LSTM forecasters for FX pairs. Five entry points:
 
-- `main_lstm.py` — the main model: every symbol pooled into one
-  shared-weight LSTM + attention model, `target_mode="zscore"` (continuous)
-  or `"class"` (5-class direction) target. Train, evaluate, or run inference.
+- `pretrain_autoencoder.py` — trains the orthogonal cross-asset factor
+  autoencoder `main_lstm.py` depends on: compresses the daily log returns of
+  a whole FX universe (K pairs) down to D orthogonal factors, a literal
+  gradient-trained equivalent of PCA. Must be run once before `main_lstm.py`
+  — see "Pretraining the cross-asset factor autoencoder" below.
+- `main_lstm.py` — the main model: forecasts one target symbol
+  (`--target-symbol`, mandatory) with an LSTM + attention decoder whose
+  recurrent input is that pretrained factor sequence concatenated with the
+  target symbol's own (normalized) log return series; everything else
+  (momentum, vol, skew, kurtosis, carry, intraday volatility, an optional
+  spectral/FFT summary) feeds the final prediction layer directly, not the
+  recurrence. `target_mode="zscore"` (continuous) or `"class"` (5-class
+  direction) target. Train, evaluate, or run inference.
 - `simple_lstm.py` — a minimal alternative: one symbol at a time, a plain
-  LSTM (no attention, no pooling across symbols), 3-class direction target
+  LSTM (no attention, no cross-asset autoencoder), 3-class direction target
   (bearish/neutral/bullish) — see the "Simple single-symbol model" section
   below.
 - `optimize_hyperparams.py` — search for good hyperparameters via
   differential evolution (for `main_lstm.py`), then feed the result straight
   back into it.
-- `dashboard.py` — a Dash web UI exposing training/evaluation and the
-  hyperparameter search (see the "Web dashboard" section below).
+- `dashboard.py` — a Dash web UI exposing pretraining, training/evaluation,
+  and the hyperparameter search (see the "Web dashboard" section below).
 
 See `fx_forecasting/models/README.md` for the `main_lstm.py` model
 architecture, and the module docstrings in `main_lstm.py`/`simple_lstm.py`/
@@ -34,40 +44,72 @@ uv run python -m fx_forecasting.data.fx_downloader --upload
 uv run python -m fx_forecasting.data.rates_downloader --upload
 ```
 
+## Pretraining the cross-asset factor autoencoder — `pretrain_autoencoder.py`
+
+`main_lstm.py`'s LSTM never sees the raw, highly collinear `xret_<pair>` log
+returns (broad USD strength/weakness shows up in most FX pairs at once) —
+only a pretrained, orthogonal reduction of them. Train that reduction first:
+
+```bash
+# Quick sanity check
+uv run python pretrain_autoencoder.py --debug
+
+# A real run: compress 7 majors down to 3 orthogonal factors
+uv run python pretrain_autoencoder.py --pairs EURUSD USDJPY GBPUSD USDCHF AUDUSD USDCAD NZDUSD \
+    --years 20 --factor-dim 3 --autoencoder-path artifacts/cross_asset_autoencoder.pt
+```
+
+The encoder (`fx_forecasting/models/orthogonal_autoencoder.py`) is a linear
+map with rows constrained to stay exactly orthonormal throughout training
+(`torch.nn.utils.parametrizations.orthogonal`), trained to minimize plain
+reconstruction MSE — per Baldi & Hornik (1989), a linear autoencoder trained
+this way recovers the same subspace PCA would, and the orthonormality
+constraint makes the individual learned factors themselves mutually
+orthogonal too, not just subspace-equivalent — a real, gradient-trained
+analogue of PCA rather than an arbitrary learned linear map. `--factor-dim`
+(D) must be strictly less than `len(--pairs)` (K).
+
+The checkpoint records exactly which `--pairs` (sorted) and `--seq-len`
+(the rolling-normalization window) it was pretrained for; `main_lstm.py`
+refuses to load one that doesn't match — the pretrained weights are only
+meaningful against data normalized the identical way.
+
 ## Training a model — `main_lstm.py`
 
 ```bash
 # Quick sanity check: tiny data, 1 epoch, steppable under a debugger
-uv run python main_lstm.py --debug
+uv run python main_lstm.py --debug --target-symbol EURUSD --autoencoder-path artifacts/debug_autoencoder.pt
 
 # A real run
-uv run python main_lstm.py --pairs EURUSD USDJPY GBPUSD --years 15 --epochs 100
+uv run python main_lstm.py --pairs EURUSD USDJPY GBPUSD --target-symbol EURUSD \
+    --years 15 --epochs 100 --autoencoder-path artifacts/cross_asset_autoencoder.pt
 
 # Load the results of a hyperparameter search on top of your other flags
-uv run python main_lstm.py --years 15 --epochs 200 --params-csv artifacts/hparam_search.csv
+uv run python main_lstm.py --target-symbol EURUSD --autoencoder-path artifacts/cross_asset_autoencoder.pt \
+    --years 15 --epochs 200 --params-csv artifacts/hparam_search.csv
 
-# Inference only, using a previously trained checkpoint
-uv run python main_lstm.py --pairs EURUSD USDJPY --infer --model-path artifacts/lstm_model.pt
-
-# Forecast only EURUSD, using every pair in --pairs as input context
-uv run python main_lstm.py --pairs EURUSD USDJPY GBPUSD --target-symbol EURUSD
+# Inference only, using a previously trained checkpoint (the autoencoder's weights are
+# already baked into this checkpoint — --autoencoder-path is not needed again)
+uv run python main_lstm.py --pairs EURUSD USDJPY --target-symbol EURUSD \
+    --infer --model-path artifacts/lstm_model.pt
 ```
 
-Every symbol's input features include, alongside its own return/vol/momentum/
-carry/CMA columns, every pair in `--pairs`' own daily log return
-(`xret_<pair>`, rolling-normalized the same way `return` is) plus
-cross-sectional summaries (mean return, return/carry percentile rank across
-pairs that day) — the pooled model sees each pair's own recent history *and*
-the rest of the traded universe's, not just an aggregate. `--target-symbol`
-narrows what gets *forecast* to one pair without narrowing that input
-context: `--pairs` still supplies the full universe for `xret_*`/carry/CMA/
-cross-sectional features, only the pooling-across-symbols step is skipped.
-With many pairs, those `xret_*` columns are often highly collinear (broad
-USD strength/weakness shows up in most of them at once); `--cross-asset-pca-dim`
-optionally compresses them, per timestep, down to that many learned linear
-factors before the encoder ever sees them, via a small PCA-like bottleneck
-layer trained end to end with the rest of the model (not literal PCA — see
-`fx_forecasting/models/cross_asset_projection.py`).
+`--target-symbol` is mandatory: this architecture always forecasts exactly
+one pair. `--pairs` still supplies the full cross-asset input universe —
+every pair's own daily log return (`xret_<pair>`, target symbol included)
+feeds the pretrained factor autoencoder (`--autoencoder-path`, required; see
+"Pretraining the cross-asset factor autoencoder" above), whose orthogonal
+output feeds the LSTM concatenated with `target_symbol`'s own (normalized)
+log return sequence, uncompressed — giving the recurrence undiluted access
+to the series it's actually forecasting on top of the shared cross-asset
+structure the K->D reduction otherwise dilutes it into. Everything else —
+`target_symbol`'s own momentum, realized vol, skew, kurtosis, carry, and
+intraday volatility — bypasses the LSTM/attention entirely and is
+concatenated directly into the final prediction layer, alongside an optional
+spectral (FFT) summary of the combined sequence (`--use-spectral-features`).
+The pretrained encoder is frozen by default (`--fine-tune-autoencoder` opts
+into updating it during training — usually not necessary, and riskier under
+FX's non-stationary return distributions per Kumar et al. 2022).
 
 Each symbol's history is split chronologically into train / validation / a
 final **test holdout** (`--val-fraction`, `--test-fraction`), with a
@@ -112,20 +154,21 @@ Key flags (`--help` for the full list):
 
 | Flag | Purpose |
 |---|---|
-| `--pairs`, `--years` | which symbols (input universe) and how much history |
-| `--target-symbol` | forecast only this one pair (must be in `--pairs`); default pools every `--pairs` symbol |
+| `--pairs`, `--years` | cross-asset input universe and how much history |
+| `--target-symbol` | **required**: the one pair to forecast (must be in `--pairs`) |
+| `--autoencoder-path` | **required**: checkpoint from `pretrain_autoencoder.py` for this exact `--pairs`/`--seq-len` |
+| `--fine-tune-autoencoder` | allow the pretrained cross-asset encoder to keep updating during training (default: frozen) |
 | `--target-mode {zscore,class}` | regression on the continuous return z-score (default), or 5-class direction label |
-| `--seq-len`, `--horizon` | LSTM lookback window; N-day-ahead target horizon |
+| `--seq-len`, `--horizon` | LSTM lookback window (must match the autoencoder checkpoint's own `--seq-len`); N-day-ahead target horizon |
 | `--val-fraction`, `--test-fraction` | size of the validation fold and the final untouched test holdout |
-| `--momentum-window`, `--vol-window` | engineered-feature windows |
-| `--hidden-size`, `--num-layers`, `--dropout` | model architecture |
+| `--momentum-window`, `--vol-window` | engineered-feature windows (FFN-side features, target symbol only) |
+| `--hidden-size`, `--num-layers`, `--dropout` | LSTM architecture |
 | `--no-predict-uncertainty` | disable the mean+log-variance head / Gaussian NLL loss (`target_mode="zscore"`), falling back to plain (weighted) MSE |
-| `--use-spectral-features`, `--spectral-embedding-dim`, `--spectral-freq-bins` | append a learned FFT-magnitude-spectrum embedding of the input window as one extra attendable key for the decoder's attention (off by default — see `fx_forecasting/models/spectral_embedding.py`) |
-| `--cross-asset-pca-dim` | reduce the `len(--pairs)` cross-asset `xret_*` inputs to this many learned, PCA-like linear factors before the encoder sees them (unset by default — see `fx_forecasting/models/cross_asset_projection.py`) |
+| `--use-spectral-features`, `--spectral-embedding-dim`, `--spectral-freq-bins` | append a learned FFT-magnitude-spectrum embedding of the factor sequence directly into the final prediction layer, alongside the other side features (off by default — see `fx_forecasting/models/spectral_embedding.py`) |
 | `--lr`, `--weight-decay`, `--epochs`, `--early-stop-patience` | training |
-| `--outlier-weight`, `--variance-penalty-weight` | loss shaping (weight extreme moves more; resist collapsing to a constant near-zero prediction) — both default to 0 now; the variance penalty in particular can force noisy, unprofitable positions on a genuinely weak signal, so treat it as an experiment to A/B, not a default-on fix |
+| `--outlier-weight`, `--variance-penalty-weight` | loss shaping (weight extreme moves more; resist collapsing to a constant near-zero prediction) — both default to 10 (nonzero, active) for this architecture; still worth validating via purged walk-forward, not a substitute for that discipline |
 | `--transaction-cost-bps`, `--signal-threshold`, `--signal-leverage`, `--max-position` | execution-aware backtest: turnover cost, minimum signal to trade at all, position scale, and cap |
-| `--infer` | skip training, just load `--model-path` and evaluate/plot |
+| `--infer` | skip training, just load `--model-path` and evaluate/plot (the autoencoder's weights are already baked into that checkpoint) |
 | `--params-csv` | apply the best trial from an `optimize_hyperparams.py` run (see below) |
 | `--debug` | shrink everything for a fast, steppable sanity check |
 
@@ -170,18 +213,21 @@ applies.
 ## Searching for hyperparameters — `optimize_hyperparams.py`
 
 Runs `scipy.optimize.differential_evolution` over a configurable parameter
-list (CMA windows, `seq_len`/`horizon`, LSTM architecture, LR, regularization,
-...), training a small/fast model per trial to minimize validation loss.
+list (`seq_len`/`horizon`, momentum/vol windows, LSTM architecture, LR,
+regularization, ...), training a small/fast model per trial to minimize validation loss.
 Every trial (not just the best) is appended to a CSV as it completes.
 
 ```bash
 # Search over every default parameter
-uv run python optimize_hyperparams.py --pairs EURUSD USDJPY --years 10 \
+uv run python optimize_hyperparams.py --pairs EURUSD USDJPY --target-symbol EURUSD \
+    --autoencoder-path artifacts/cross_asset_autoencoder.pt --years 10 \
     --maxiter 20 --popsize 12 --trial-epochs 8 \
     --results-csv artifacts/hparam_search.csv
 
 # Narrow the search to a subset of parameters (others stay at Config defaults)
-uv run python optimize_hyperparams.py --params hidden_size dropout lr \
+uv run python optimize_hyperparams.py --target-symbol EURUSD \
+    --autoencoder-path artifacts/cross_asset_autoencoder.pt \
+    --params hidden_size dropout lr \
     --maxiter 15 --popsize 10 --results-csv artifacts/hparam_search.csv
 
 # Inspect an existing results CSV without running a new search
@@ -189,19 +235,24 @@ uv run python optimize_hyperparams.py --load artifacts/hparam_search.csv
 ```
 
 Searchable parameter names (for `--params`): `seq_len`, `horizon`,
-`momentum_window`, `vol_window`, `cma1_short`, `cma1_long`, `cma2_short`,
-`cma2_long`, `cma3_short`, `cma3_long` (the 3 CMA `(short, long)` EWMA
-pairs), `hidden_size`, `num_layers`, `dropout`, `lr`, `weight_decay`,
-`outlier_weight`, `variance_penalty_weight`, `batch_size`. Edit
+`momentum_window`, `vol_window`, `hidden_size`, `num_layers`, `dropout`,
+`lr`, `weight_decay`, `outlier_weight`, `variance_penalty_weight`,
+`batch_size`. Edit
 `DEFAULT_PARAM_SPECS` in `fx_forecasting/hparam_search.py` to change bounds
-or add new ones.
+or add new ones. Note: including `seq_len` in the search means most sampled
+values won't match `--autoencoder-path`'s own pretrained `seq_len` — those
+trials fail fast (caught, scored as a large penalty) rather than crashing the
+search, but it wastes evaluations; leave `seq_len` out of `--params` (the
+default list includes it) unless you're prepared for that, or pretrain
+several autoencoder checkpoints across the `seq_len` values you want to try.
 
 Key flags:
 
 | Flag | Purpose |
 |---|---|
-| `--pairs`, `--years` | data window to optimize over (kept small/fast on purpose) |
-| `--target-symbol` | search for a model forecasting only this one pair (must be in `--pairs`) |
+| `--pairs`, `--years` | cross-asset input universe and data window to optimize over (kept small/fast on purpose) |
+| `--target-symbol` | **required**: search for a model forecasting only this one pair (must be in `--pairs`) |
+| `--autoencoder-path` | **required**: pretrained checkpoint from `pretrain_autoencoder.py` (see above) |
 | `--params` | subset of parameters to search; default is all of them |
 | `--trial-epochs`, `--trial-early-stop-patience` | per-trial training budget — keep small for speed |
 | `--maxiter`, `--popsize`, `--workers` | DE search budget / parallelism |
@@ -211,37 +262,40 @@ Key flags:
 ### Using the result
 
 ```bash
-uv run python optimize_hyperparams.py --pairs EURUSD USDJPY --years 10 \
+uv run python optimize_hyperparams.py --pairs EURUSD USDJPY --target-symbol EURUSD \
+    --autoencoder-path artifacts/cross_asset_autoencoder.pt --years 10 \
     --maxiter 20 --results-csv artifacts/hparam_search.csv
 
-uv run python main_lstm.py --pairs EURUSD USDJPY --years 20 --epochs 200 \
+uv run python main_lstm.py --pairs EURUSD USDJPY --target-symbol EURUSD \
+    --autoencoder-path artifacts/cross_asset_autoencoder.pt --years 20 --epochs 200 \
     --params-csv artifacts/hparam_search.csv
 ```
 
 `--params-csv` loads the lowest-loss row from the results CSV and applies it
 on top of `main_lstm.py`'s other flags — it only overrides whichever
 parameters the search actually covered (e.g. a search run with `--params
-hidden_size dropout` leaves everything else, including CMA windows, at
-whatever `main_lstm.py`'s own flags/defaults say). This is deliberately
+hidden_size dropout` leaves everything else at whatever `main_lstm.py`'s own
+flags/defaults say). This is deliberately
 separate from the fast trial run: you typically want a full `--years` window
 and a real `--epochs` budget for the final model, neither of which the search
 itself needs.
 
 ## Web dashboard — `dashboard.py`
 
-A Dash UI over `main_lstm.py` and `optimize_hyperparams.py` (not
-`simple_lstm.py`, which has no dashboard tab yet), so you don't need the
-terminal for routine runs:
+A Dash UI over `pretrain_autoencoder.py`, `main_lstm.py`, and
+`optimize_hyperparams.py` (not `simple_lstm.py`, which has no dashboard tab
+yet), so you don't need the terminal for routine runs:
 
 ```bash
 uv run python dashboard.py
 ```
 
-Then open <http://127.0.0.1:8050/>. Two tabs, "Train / Evaluate" and
-"Hyperparameter Search", each auto-generate their form directly from that
-script's own `argparse` parser (`main_lstm.build_parser()` /
+Then open <http://127.0.0.1:8050/>. Three tabs, "Pretrain Autoencoder",
+"Train / Evaluate", and "Hyperparameter Search", each auto-generate their
+form directly from that script's own `argparse` parser
+(`pretrain_autoencoder.build_parser()` / `main_lstm.build_parser()` /
 `optimize_hyperparams.build_parser()`) — every CLI flag documented above has
-a matching field, and the two stay in sync automatically as the underlying
+a matching field, and all three stay in sync automatically as the underlying
 scripts change; nothing about individual parameters is hardcoded in the
 dashboard itself. Leave a field blank to fall back to that flag's own
 script default.
@@ -252,6 +306,11 @@ a run is in progress. The log panel auto-scrolls to follow new lines as long
 as you're already at the bottom; scroll up to read earlier output and it
 stops following until you scroll back down. And:
 
+- **Pretrain Autoencoder** runs `pretrain_autoencoder.py` and reports where
+  the resulting checkpoint was saved once it finishes — feed that path into
+  the "Train / Evaluate" tab's `--autoencoder-path` field. No plot here
+  (reconstruction quality is logged as train/val/test MSE, not plotted); the
+  real check is how the resulting `main_lstm.py` model performs.
 - **Train / Evaluate** shows the out-of-sample and in-sample predictions
   plots and the strategy PnL plot once training finishes.
 - **Hyperparameter Search** shows the top 10 trials (by loss) from the
