@@ -301,6 +301,15 @@ def compute_target_quantile(
 # positive return; the bucket edges/count stay identical either way.
 CLASS_NAMES: tuple[str, ...] = ("very_bearish", "bearish", "neutral", "bullish", "very_bullish")
 CLASS_QUANTILE_EDGES: tuple[float, ...] = (0.0, 0.1, 0.3, 0.7, 0.9, 1.0)
+# Signed conviction value per class, index-aligned with CLASS_NAMES — 0 at neutral, symmetric
+# +/-1 (mild) and +/-2 (extreme) either side. Trading-signal and display code (main_lstm.py's
+# collect_signal, collect_predictions, save_features_csv, plot_predictions_grid) uses these
+# values rather than the raw 0-4 class index, so a prediction's numeric value already carries
+# its long/short sign directly. The 0-4 *index* itself is still what nn.CrossEntropyLoss/
+# nn.Embedding require internally (PyTorch class indices must be 0..num_classes-1) — that
+# never changes; CLASS_VALUES only affects how a class is represented once training/loss
+# computation is done with it.
+CLASS_VALUES: tuple[int, ...] = (-2, -1, 0, 1, 2)
 
 
 def _quantile_to_class(quantile: pd.Series, horizon: int) -> pd.Series:

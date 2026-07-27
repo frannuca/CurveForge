@@ -59,7 +59,6 @@ DEFAULT_PARAM_SPECS: tuple[ParamSpec, ...] = (
     ParamSpec("lr", -4.0, -1.0, "log_float"),  # 1e-4 .. 1e-1
     ParamSpec("weight_decay", -8.0, -2.0, "log_float"),  # 1e-8 .. 1e-2
     ParamSpec("outlier_weight", 0.0, 15.0, "float"),
-    ParamSpec("variance_penalty_weight", 0.0, 5.0, "float"),
     ParamSpec("batch_size", 16, 128, "int"),
 )
 

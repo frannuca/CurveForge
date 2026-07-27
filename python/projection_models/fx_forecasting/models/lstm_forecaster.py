@@ -1,25 +1,39 @@
-"""Causal LSTM encoder-decoder with attention, forecasting N steps ahead recursively.
+"""LSTM sequence generator + feed-forward output head — no encoder-decoder split, no attention.
 
-The encoder consumes a *pretrained, orthogonally-reduced* cross-asset return factor
-sequence (see `cross_asset_encoder` below) and is causal by construction: at step ``t`` it
-has only seen inputs up to ``t``. The decoder then unrolls autoregressively for
-``forecast_horizon`` steps — the classic sequence-to-sequence-with-attention design
-(Sutskever et al., 2014, "Sequence to Sequence Learning with Neural Networks"; Bahdanau et
-al., 2015, "Neural Machine Translation by Jointly Learning to Align and Translate"), adapted
-here for continuous or per-class-logit regression instead of token generation. At every
-decoding step the model attends over *every* encoder timestep — queried by the decoder's own
-current hidden state, so the attention weights are recomputed fresh at each step, not fixed —
-then feeds its own prediction from step t back in as input for step t+1 (with optional
-teacher forcing during training), the standard way to extend a single-step model into a
-genuine multi-step forecaster.
+A single `nn.LSTM` consumes the raw (rolling-normalized upstream) cross-asset log-return
+history — its *only* input — then continues its own recurrence for `forecast_horizon` further
+steps to directly generate the forecast sequence itself: since there's no real future return
+to feed it at those steps (that's what's being forecast), a single learned "continuation"
+vector stands in at each of them, letting the LSTM's own hidden-state dynamics carry the
+forecast forward from where the real history left off. This is the plain, attention-free
+sequence-to-sequence pattern (Sutskever, Vinyals & Le, 2014, "Sequence to Sequence Learning
+with Neural Networks" §2: the decoder is conditioned only on the encoder's final state, not on
+attending back over it) — collapsed further here into a *single* shared LSTM instance for both
+phases (no separate encoder/decoder weight sets), since there's nothing for a second recurrent
+module or an attention mechanism to add when the "decoder" has no real per-step input to
+attend *from* in the first place.
 
-Everything that is *not* part of the clean return-factor sequence — momentum, realized
-vol/skew/kurtosis, carry, CMA crossovers, intraday volatility, and the
-optional spectral (FFT) summary of the factor sequence itself — bypasses the recurrence
-entirely and is injected only at the final prediction layer (Lim, Arık, Loeff & Pfister,
-2021, "Temporal Fusion Transformers": non-sequential covariates are best given directly to
-the output stage rather than forced through the same recurrent bottleneck as the genuine
-time-varying signal).
+A pretrained, orthogonally-reduced snapshot of the same cross-asset history (last input
+timestep only), the target symbol's own side features (last input timestep only), and an
+optional spectral (FFT) summary of the input sequence are computed once and reused at every
+forecast step — concatenated with that step's own LSTM output and passed through a small
+feed-forward network to produce that step's output (Lim, Arık, Loeff & Pfister, 2021,
+"Temporal Fusion Transformers": non-sequential/static covariates are best given directly to
+the output stage rather than forced through the recurrence).
+
+`target_mode` picks what that output head produces, as two mutually exclusive alternatives
+over the exact same trunk (everything up to `pre_output_norm` is identical either way):
+`"class"` (default) — `output_size` discrete direction-class logits, trained under
+`nn.CrossEntropyLoss`; or `"zscore"` — a single continuous value per step (the horizon return
+z-score itself), trained under a regression loss (e.g. MSE) — see `main_lstm.py::run_epoch`
+for how each mode's loss/metrics differ. Classification lets the trading signal
+(`main_lstm.collect_signal`) recover a conviction-weighted expected value from the *entire*
+predicted class distribution; direct z-score regression instead lets the model express any
+real-valued conviction directly, at the cost of the discrete-class-imbalance handling
+(`class_distance_weights`) classification gets for free. Both are kept as options because
+neither dominates the other a priori — chosen by `--target-mode` per run, compared like any
+other hyperparameter under the same purged walk-forward + frozen test holdout discipline as
+everything else in this pipeline.
 """
 
 from __future__ import annotations
@@ -31,84 +45,49 @@ from fx_forecasting.models.orthogonal_autoencoder import OrthogonalAutoencoder
 from fx_forecasting.models.spectral_embedding import SpectralEmbedding
 
 
-class AttentionPool(nn.Module):
-    """Additive (Bahdanau-style) attention: scores every encoder state against a query,
-    returning their weighted sum as a context vector.
+class LSTMSeqClassifier(nn.Module):
+    """A single LSTM generates `forecast_horizon` forecast steps directly from the cross-asset
+    log-return history; a feed-forward network turns each step into either class logits or a
+    continuous z-score prediction, depending on `target_mode`.
 
-    Used as the decoder's attention: `query` is the decoder's current hidden
-    state, which changes at every recursive decoding step (unlike a fixed
-    learned parameter), so the model can attend to different parts of the
-    input history depending on what it's already forecast so far.
-    """
+    Input: ``x`` of shape (batch, seq_len, num_factors), two column blocks in this exact
+    order (`main_lstm.py::build_target_dataset`'s convention): leading `num_side_features`
+    columns of target-symbol-only non-sequential covariates (momentum, rvol, skew, kurt,
+    carry, intraday volatility), then the *trailing* `num_cross_asset_factors` (K) columns of
+    per-pair `xret_*` cross-asset log returns (including the target's own) — the LSTM's
+    *only* input; the side features never enter the recurrence.
 
-    def __init__(self, hidden_size: int) -> None:
-        super().__init__()
-        self.query_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.key_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.energy_proj = nn.Linear(hidden_size, 1, bias=False)
-
-    def forward(self, query: Tensor, keys: Tensor) -> tuple[Tensor, Tensor]:
-        """
-        Args:
-            query: decoder hidden state, shape (batch, hidden_size).
-            keys: encoder states, shape (batch, seq_len, hidden_size).
-
-        Returns:
-            context: attention-weighted summary, shape (batch, hidden_size).
-            weights: attention weights over the sequence, shape (batch, seq_len).
-        """
-        query_proj = self.query_proj(query).unsqueeze(1)
-        keys_proj = self.key_proj(keys)
-        scores = self.energy_proj(torch.tanh(query_proj + keys_proj)).squeeze(-1)
-        weights = torch.softmax(scores, dim=-1)
-        context = torch.bmm(weights.unsqueeze(1), keys).squeeze(1)
-        return context, weights
-
-
-class LSTMAttentionForecaster(nn.Module):
-    """Encoder-decoder LSTM with Bahdanau attention, forecasting `forecast_horizon`
-    steps ahead recursively, over a pretrained-and-reduced cross-asset factor sequence.
-
-    Input: ``x`` of shape (batch, seq_len, num_factors), three column blocks in this exact
-    order (`main_lstm.py::build_target_dataset`'s convention): leading target-symbol-only
-    side features (momentum, rvol, skew, kurt, carry, CMA, intraday volatility), then
-    `num_target_series` columns of the target symbol's own (normalized) log return sequence,
-    then the *trailing* `num_cross_asset_factors` (K) columns of per-pair `xret_*`
-    cross-asset log returns. Output: raw per-step values, shape
+    Output, `target_mode="class"` (default): raw per-step class logits, shape
     (batch, forecast_horizon, output_size) when ``forecast_horizon > 1``, or
-    (batch, output_size) when it's 1 — no output activation, since the right nonlinearity
-    (softmax for classification, none for regression) depends on the loss/target the caller
-    has chosen.
+    (batch, output_size) when it's 1 — no output activation: `nn.CrossEntropyLoss` applies
+    `log_softmax` internally during training (explicit `torch.softmax` is applied separately
+    at inference where a probability distribution is actually needed — see
+    `main_lstm.collect_signal`), so pre-squashing the logits here would double-apply a
+    nonlinearity and distort the loss.
 
-    Feedback at each decoding step depends on what `output_size` represents:
-    a per-step class ID (embedded via `nn.Embedding`) when `output_size > 1`
-    (classification, logits over classes), or the raw scalar value (via a
-    linear projection) when `output_size == 1` (continuous regression) — the
-    standard way to feed a discrete vs. continuous decoder output back in as
-    the next step's input.
+    Output, `target_mode="zscore"`: a single continuous value per step, shape
+    (batch, forecast_horizon) when ``forecast_horizon > 1``, or (batch,) when it's 1 — again no
+    output activation, since it's a regression target with no natural bound to squash toward.
+    `output_size` is ignored in this mode (the output head is fixed at width 1).
 
-    `cross_asset_encoder`: the trailing `num_cross_asset_factors` (K) columns of `x` are
-    projected to `factor_dim` (D < K) orthogonal factors by an `OrthogonalAutoencoder`'s
-    encoder (see `fx_forecasting.models.orthogonal_autoencoder`) — pretrained by
-    `pretrain_autoencoder.py`, its weights loaded and optionally frozen by
-    `main_lstm.build_model`, *not* trained fresh here. Since `factor_dim < num_cross_asset_factors`,
-    this compression can dilute the target symbol's own idiosyncratic dynamics into the
-    shared cross-asset structure; `num_target_series` columns of the target's own (normalized)
-    log return sequence are concatenated onto the D factors, uncompressed, before the LSTM
-    ever sees either — giving the recurrence privileged, undiluted access to the series it's
-    actually forecasting, on top of the shared factor structure. `factor_norm` LayerNorms the
-    combined (D + num_target_series)-dim sequence before the LSTM, since the orthogonal map
-    redistributes variance across the D outputs unevenly depending on the data's own
-    covariance structure and could otherwise saturate the LSTM's gates.
+    `self.lstm` is called *twice*, sharing the same weights both times:
 
-    `use_spectral_features=True` additionally runs the same combined sequence through a
-    `SpectralEmbedding` (a small learned projection of its own FFT magnitude spectrum) —
-    like every other side feature, this is concatenated directly into the final prediction
-    layer's input, not fed back into the recurrence or attention.
+    1. Over the real `seq_len`-step history (`xret`, LayerNorm'd via `input_norm`), producing
+       a final `(h_n, c_n)` — the only thing carried from this phase to the next.
+    2. Over `forecast_horizon` further steps, each fed the *same* learned
+       `continuation_token` (there is no real input for a future step — this is what's being
+       forecast), starting from that `(h_n, c_n)`. The hidden state at each of these steps
+       *is* that step's forecast, generated purely from the LSTM's own recurrence continuing
+       to evolve — no attention over the history, no second LSTM instance.
 
-    `num_side_features`: width of the leading (non-sequential) columns of `x`; only their
-    *last* timestep (the forecast origin's own current side-feature values) is used, also
-    injected only at the final prediction layer.
+    `cross_asset_encoder`: the *same* trailing K columns, at the forecast origin's own last
+    timestep only, are projected to `factor_dim` (D < K) orthogonal factors by an
+    `OrthogonalAutoencoder`'s encoder (see `fx_forecasting.models.orthogonal_autoencoder`) —
+    pretrained by `pretrain_autoencoder.py`, its weights loaded and optionally frozen by
+    `main_lstm.build_model`, *not* trained fresh here. A static, structurally-orthogonal
+    snapshot of "where the whole cross-asset universe stands right now," reused unchanged at
+    every forecast step's classifier input, alongside the side features and (if enabled) the
+    spectral summary.
     """
 
     def __init__(
@@ -118,182 +97,130 @@ class LSTMAttentionForecaster(nn.Module):
         num_cross_asset_factors: int,
         factor_dim: int,
         num_side_features: int = 0,
-        num_target_series: int = 0,
         forecast_horizon: int = 1,
         hidden_size: int = 128,
         num_layers: int = 2,
         dropout: float = 0.1,
-        predict_uncertainty: bool = False,
         use_spectral_features: bool = False,
         spectral_embedding_dim: int = 8,
         spectral_freq_bins: int = 16,
+        target_mode: str = "class",
     ) -> None:
         super().__init__()
-        if output_size < 1:
-            raise ValueError("output_size must be >= 1")
+        if target_mode not in ("class", "zscore"):
+            raise ValueError(f"target_mode must be 'class' or 'zscore', got {target_mode!r}")
+        if target_mode == "class" and output_size < 2:
+            raise ValueError("output_size must be >= 2 (classification requires at least 2 classes)")
         if forecast_horizon < 1:
             raise ValueError("forecast_horizon must be >= 1")
         if num_cross_asset_factors <= 0:
             raise ValueError("num_cross_asset_factors must be > 0")
-        if num_target_series < 0:
-            raise ValueError("num_target_series must be >= 0")
-        if num_factors < num_cross_asset_factors + num_target_series + num_side_features:
+        if num_factors < num_cross_asset_factors + num_side_features:
             raise ValueError(
                 f"num_factors ({num_factors}) must be >= num_cross_asset_factors "
-                f"({num_cross_asset_factors}) + num_target_series ({num_target_series}) "
-                f"+ num_side_features ({num_side_features})"
+                f"({num_cross_asset_factors}) + num_side_features ({num_side_features})"
             )
 
         self.num_factors = num_factors
-        self.output_size = output_size
+        self.target_mode = target_mode
+        # A "zscore" head is a fixed single scalar per step regardless of what output_size
+        # was passed — output_size only ever means "number of classes" in "class" mode.
+        self.output_size = output_size if target_mode == "class" else 1
         self.num_cross_asset_factors = num_cross_asset_factors
         self.factor_dim = factor_dim
         self.num_side_features = num_side_features
-        self.num_target_series = num_target_series
         self.forecast_horizon = forecast_horizon
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.is_classification = output_size > 1
-        self.predict_uncertainty = predict_uncertainty and not self.is_classification
         self.use_spectral_features = use_spectral_features
 
-        # Pretrained (see pretrain_autoencoder.py), orthogonally-constrained K -> D reduction
-        # of the trailing K cross-asset xret_* columns — weights are loaded (and, unless
-        # fine-tuning is requested, frozen) by main_lstm.build_model after construction; this
-        # class only owns the architecture, never the pretrained state itself.
+        # Pretrained (see pretrain_autoencoder.py), orthogonally-constrained K -> D snapshot
+        # of the forecast origin's own cross-asset state — feeds the classifier (see
+        # forward), not the LSTM.
         self.cross_asset_encoder = OrthogonalAutoencoder(num_cross_asset_factors, factor_dim).encoder
-        lstm_input_size = factor_dim + num_target_series
-        self.factor_norm = nn.LayerNorm(lstm_input_size)
 
-        self.encoder = nn.LSTM(
-            input_size=lstm_input_size,
+        # The LSTM's entire input, in both phases, is width K: real cross-asset returns in
+        # phase 1, the learned continuation_token (broadcast every step) in phase 2.
+        self.input_norm = nn.LayerNorm(num_cross_asset_factors)
+        self.lstm = nn.LSTM(
+            input_size=num_cross_asset_factors,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
-        self.attention_pool = AttentionPool(hidden_size)
+        self.continuation_token = nn.Parameter(torch.zeros(num_cross_asset_factors))
 
-        # Operates on the same factor sequence the encoder does (not the raw side features),
-        # and — unlike the earlier "extra attention key" design — feeds the final prediction
-        # layer directly (see pre_output_norm/output_layer below), never the attention/LSTM.
+        # Operates on the LSTM's own (LayerNorm'd) history input, and — like the orthogonal
+        # snapshot — feeds the classifier directly (see pre_output_norm/classifier below),
+        # never the recurrence itself.
         self.spectral = (
-            SpectralEmbedding(lstm_input_size, spectral_freq_bins, spectral_embedding_dim)
+            SpectralEmbedding(num_cross_asset_factors, spectral_freq_bins, spectral_embedding_dim)
             if use_spectral_features
             else None
         )
 
-        # Embeds the previous step's output back into the decoder's input space.
-        if self.is_classification:
-            self.value_embedding = nn.Embedding(output_size, hidden_size)
-        else:
-            self.value_embedding = nn.Linear(1, hidden_size)
-        self.start_token = nn.Parameter(torch.zeros(hidden_size))
-
-        self.decoder_cell = nn.LSTMCell(hidden_size * 2, hidden_size)
         self.dropout = nn.Dropout(dropout)
 
-        # Final feed-forward head: decoder hidden state + attention context (both width
-        # hidden_size) plus every non-sequential covariate — spectral summary (if enabled)
-        # and the side features at the forecast origin — LayerNorm'd together immediately
-        # before this last linear layer so no one block's raw scale dominates the others
-        # purely because of its natural units, not its actual predictive relevance.
+        # Feed-forward classifier head: this step's own LSTM hidden state, plus every
+        # non-sequential covariate — spectral summary (if enabled), the orthogonal
+        # cross-asset snapshot, and the side features at the forecast origin — LayerNorm'd
+        # together immediately before the network so no one block's raw scale dominates the
+        # others purely because of its natural units, not its actual predictive relevance.
         pre_output_size = (
-            hidden_size * 2
+            hidden_size
             + (spectral_embedding_dim if use_spectral_features else 0)
+            + factor_dim
             + num_side_features
         )
         self.pre_output_norm = nn.LayerNorm(pre_output_size)
-        self.output_layer = nn.Linear(pre_output_size, output_size)
-        self.log_variance_layer = nn.Linear(pre_output_size, 1) if self.predict_uncertainty else None
+        self.classifier = nn.Sequential(
+            nn.Linear(pre_output_size, pre_output_size),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(pre_output_size, self.output_size),
+        )
 
-    def encode(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor | None, Tensor]:
-        """Returns `(encoder_outputs, dec_h0, dec_c0, spectral_vec_or_None, side_features_at_t)`.
-
-        `side_features_at_t` is the forecast origin's own (last-timestep) side-feature
-        vector — a static, per-window covariate, not a sequence — reused unchanged at every
-        decoding step in `forward`.
-        """
-        k = self.num_cross_asset_factors
-        t = self.num_target_series
-        base = x[..., : -(k + t)] if t > 0 else x[..., :-k]
-        xret = x[..., -k:]
-        factors = self.cross_asset_encoder(xret)
-        if t > 0:
-            target_series = x[..., -(k + t) : -k]
-            lstm_input = self.factor_norm(torch.cat([factors, target_series], dim=-1))
-        else:
-            lstm_input = self.factor_norm(factors)
-        encoder_outputs, (h_n, c_n) = self.encoder(lstm_input)
-        spectral_vec = self.spectral(lstm_input) if self.spectral is not None else None
-        side_features_at_t = base[:, -1, :]
-        return encoder_outputs, h_n[-1], c_n[-1], spectral_vec, side_features_at_t
-
-    def forward(
-        self,
-        x: Tensor,
-        targets: Tensor | None = None,
-        teacher_forcing_ratio: float = 0.5,
-        return_uncertainty: bool = False,
-    ) -> Tensor | tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor) -> Tensor:
         """
         Args:
             x: normalized multifactor input sequence, shape (batch, seq_len, num_factors).
-            targets: ground truth for teacher forcing during training, shape
-                (batch, forecast_horizon) — class indices if classification,
-                continuous values if regression. Ignored in eval mode or when
-                None (the model then always feeds back its own prediction).
-            teacher_forcing_ratio: probability of feeding the true previous
-                step's value (rather than the model's own prediction) at each
-                decoding step beyond the first. Only applies while training
-                and when `targets` is given.
 
         Returns:
-            Per-step outputs, shape (batch, forecast_horizon, output_size) if
-            `forecast_horizon > 1`, else (batch, output_size).
+            `target_mode="class"`: per-step class logits, shape
+            (batch, forecast_horizon, output_size) if `forecast_horizon > 1`, else
+            (batch, output_size). `target_mode="zscore"`: per-step continuous prediction,
+            shape (batch, forecast_horizon) if `forecast_horizon > 1`, else (batch,).
         """
         batch_size = x.size(0)
-        encoder_outputs, dec_h, dec_c, spectral_vec, side_features_at_t = self.encode(x)
-        prev_embed = self.start_token.unsqueeze(0).expand(batch_size, -1)
+        k = self.num_cross_asset_factors
+        base, xret = x[..., :-k], x[..., -k:]
+        lstm_input = self.input_norm(xret)
 
-        step_outputs = []
-        step_log_variances = []
+        # Phase 1: consume the real history.
+        _, (h_n, c_n) = self.lstm(lstm_input)
+
+        # Phase 2: continue the *same* LSTM for forecast_horizon more steps, generating the
+        # forecast sequence purely from its own hidden-state evolution — no real input, no
+        # second recurrent module, no attention over phase 1's outputs.
+        continuation = self.continuation_token.view(1, 1, -1).expand(batch_size, self.forecast_horizon, -1)
+        forecast_outputs, _ = self.lstm(continuation, (h_n, c_n))  # (batch, forecast_horizon, hidden_size)
+
+        factors_at_t = self.cross_asset_encoder(xret[:, -1, :])
+        side_features_at_t = base[:, -1, :]
+        spectral_vec = self.spectral(lstm_input) if self.spectral is not None else None
+
+        step_logits = []
         for t in range(self.forecast_horizon):
-            context, _ = self.attention_pool(dec_h, encoder_outputs)
-            decoder_input = torch.cat([prev_embed, context], dim=-1)
-            dec_h, dec_c = self.decoder_cell(decoder_input, (dec_h, dec_c))
-
-            pre_output = [self.dropout(dec_h), context]
+            pre_output = [self.dropout(forecast_outputs[:, t, :])]
             if spectral_vec is not None:
                 pre_output.append(spectral_vec)
+            pre_output.append(factors_at_t)
             pre_output.append(side_features_at_t)
             output_features = self.pre_output_norm(torch.cat(pre_output, dim=-1))
+            step_logits.append(self.classifier(output_features))
 
-            step_out = self.output_layer(output_features)
-            step_outputs.append(step_out)
-            if self.log_variance_layer is not None:
-                # Clamping prevents numerical overflow in the Gaussian NLL while
-                # still allowing the model to express a wide range of uncertainty.
-                step_log_variances.append(self.log_variance_layer(output_features).clamp(-8.0, 5.0))
-
-            use_teacher_forcing = (
-                targets is not None
-                and self.training
-                and torch.rand(()).item() < teacher_forcing_ratio
-            )
-            if self.is_classification:
-                next_value = targets[:, t] if use_teacher_forcing else step_out.argmax(dim=-1)
-                prev_embed = self.value_embedding(next_value)
-            else:
-                next_value = targets[:, t] if use_teacher_forcing else step_out.squeeze(-1)
-                prev_embed = self.value_embedding(next_value.unsqueeze(-1))
-
-        result = torch.stack(step_outputs, dim=1)  # (batch, forecast_horizon, output_size)
-        result = result.squeeze(1) if self.forecast_horizon == 1 else result
-        if not return_uncertainty:
-            return result
-        if not step_log_variances:
-            raise ValueError("return_uncertainty=True requires predict_uncertainty=True regression model")
-        log_variance = torch.stack(step_log_variances, dim=1)
-        log_variance = log_variance.squeeze(1) if self.forecast_horizon == 1 else log_variance
-        return result, log_variance
+        result = torch.stack(step_logits, dim=1)  # (batch, forecast_horizon, output_size)
+        if self.target_mode == "zscore":
+            result = result.squeeze(-1)  # (batch, forecast_horizon) — output_size is fixed at 1
+        return result.squeeze(1) if self.forecast_horizon == 1 else result

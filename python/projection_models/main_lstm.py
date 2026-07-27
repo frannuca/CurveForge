@@ -1,24 +1,28 @@
-"""Train the LSTM + attention forecaster on a single target FX pair.
+"""Train the LSTM sequence forecaster on a single target FX pair.
 
-The model's recurrent input is a pretrained, orthogonally-reduced cross-asset return factor
-sequence plus the target symbol's own (normalized) log return series: every pair in
-``--pairs``' own daily log return (including the target's own) is compressed from K raw
-series down to D orthogonal factors by a linear autoencoder pretrained separately (see
-``pretrain_autoencoder.py``) and loaded here — not trained fresh alongside the rest of the
-network — then concatenated, uncompressed, with the target's own return sequence so the LSTM
-has undiluted access to the series it's actually forecasting on top of the shared cross-asset
-structure. Everything else — momentum, realized volatility, skew, kurtosis, carry, intraday
-volatility, and an optional spectral (FFT) summary of the combined factor sequence — bypasses
-the LSTM entirely and is injected only at the final prediction layer, alongside the decoder's
-attention context. (Volume change was considered too, but FX spot volume is uniformly 0 from
-this project's data source — forex is OTC with no consolidated tape — so it carries no signal
-and is not included.)
+A single LSTM (no encoder-decoder split, no attention — see
+`fx_forecasting/models/lstm_forecaster.py`) consumes the raw (rolling-normalized upstream,
+uncompressed) cross-asset return sequence — every pair in ``--pairs``' own daily log return
+(including the target's own) — and continues its own recurrence to directly generate the
+forecast sequence. A pretrained, orthogonally-constrained linear reduction of that same
+sequence (see ``pretrain_autoencoder.py``) is computed too, but only at the forecast origin's
+own last timestep — a static, structurally-orthogonal snapshot of "where the whole traded
+universe stands right now" — and, along with momentum, realized volatility, skew, kurtosis,
+carry, intraday volatility, and an optional spectral (FFT) summary, bypasses the LSTM
+entirely and is injected only into the final feed-forward classifier. (Volume change was
+considered too, but FX spot volume is uniformly 0 from this project's data source — forex is
+OTC with no consolidated tape — so it carries no signal and is not included.)
 
-``Config.target_mode`` picks what the target is: ``"zscore"`` (default) is the continuous,
-standardized ("z-scored") cumulative return itself (see
-`fx_forecasting.features.compute_target_zscore`); ``"class"`` buckets that same z-score into
-5 discrete direction labels, very_bearish..very_bullish (see
-`fx_forecasting.features.compute_target_class`).
+`--target-mode` picks between two mutually exclusive output heads over that same trunk (see
+`fx_forecasting/models/lstm_forecaster.py`): `class` (default) predicts 5 discrete direction
+classes, very_bearish..very_bullish (see `fx_forecasting.features.compute_target_class`),
+trained under class-distance-weighted cross-entropy — `collect_signal` then derives a
+continuous trading signal as the expected value of the predicted class distribution. `zscore`
+instead predicts the continuous horizon return z-score directly, trained under a
+magnitude-weighted MSE loss — the model's own output *is* the signal, with no distribution to
+take an expectation over. Neither dominates the other a priori; compare them like any other
+hyperparameter under this pipeline's usual purged walk-forward + frozen test holdout
+discipline.
 
 Deliberately written as small, independent, top-level functions (rather than one
 monolithic pipeline) so each stage can be run and inspected separately under a
@@ -38,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import threading
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -59,6 +62,7 @@ from fx_forecasting.data.fx_downloader import MAJOR_FX_PAIRS
 from fx_forecasting.features import (
     CLASS_NAMES,
     CLASS_QUANTILE_EDGES,
+    CLASS_VALUES,
     build_symbol_frame,
     compute_carry_feature,
     compute_cross_sectional_target_class,
@@ -70,7 +74,7 @@ from fx_forecasting.features import (
     compute_target_zscore,
     compute_volatility_regime,
 )
-from fx_forecasting.models.lstm_forecaster import LSTMAttentionForecaster
+from fx_forecasting.models.lstm_forecaster import LSTMSeqClassifier
 from fx_forecasting.trading import (
     LinearCalibrator,
     annualized_sharpe,
@@ -101,7 +105,12 @@ class Config:
 
     seq_len: int = 60
     horizon: int = 2  # N days ahead for the single cumulative-return target
-    target_mode: str = "zscore"  # "zscore" (continuous normalized return, default) or "class" (5-class direction label)
+    # "class": predict the 5-way direction class (see fx_forecasting.features.CLASS_NAMES),
+    # trained under class-distance-weighted cross-entropy. "zscore": predict the continuous
+    # horizon return z-score directly, trained under MSE. Mutually exclusive alternatives over
+    # the same trunk (see fx_forecasting.models.lstm_forecaster.LSTMSeqClassifier) — neither
+    # dominates the other a priori, so both are kept and selected per run via --target-mode.
+    target_mode: str = "class"
     # If True, the target is target_symbol's horizon-day return *relative to* the
     # cross-sectional median of every other --pairs symbol (did it outperform the rest of
     # the universe), rather than its own absolute direction — see
@@ -129,14 +138,8 @@ class Config:
     min_lr: float = 1e-6
     early_stop_patience: int = 10  # stop training if val loss hasn't improved in this many epochs
     outlier_weight: float = 0.0  # start with calibrated likelihood; tune only inside walk-forward development folds
-    # Kept ON by default for this architecture (unlike outlier_weight): a weak-signal target
-    # otherwise collapses to predicting ~its own unconditional mean regardless of input (see
-    # `variance_penalty`) — still worth validating via purged walk-forward, not a substitute
-    # for that discipline, just not something to start from disabled here.
-    variance_penalty_weight: float = 10.0
     val_fraction: float = 0.2
     test_fraction: float = 0.1
-    predict_uncertainty: bool = True
     use_spectral_features: bool = False  # off by default — validate via purged walk-forward before defaulting on
     spectral_embedding_dim: int = 8
     spectral_freq_bins: int = 16
@@ -156,10 +159,10 @@ class Config:
     # cross-sectional (peer-median) realized-vol regime is in its highest bucket — see
     # fx_forecasting.features.compute_volatility_regime. Diagnostic motivation: hit rate was
     # found to be consistently worse specifically in high-market-vol periods, replicated
-    # across validation and test and across two different vol-regime definitions (see
-    # regime_analysis.py) — this tests whether avoiding those periods actually improves
-    # realized Sharpe/PnL, not just the hit-rate proxy. Does not affect training, only the
-    # backtest; the model itself is unchanged either way.
+    # across validation and test and across two different vol-regime definitions — this tests
+    # whether avoiding those periods actually improves realized Sharpe/PnL, not just the
+    # hit-rate proxy. Does not affect training, only the backtest; the model itself is
+    # unchanged either way.
     regime_gate: bool = False
     regime_vol_window: int = 20  # trailing realized-vol window feeding the regime label
     regime_window: int = 252  # minimum history (days) before a regime label is assigned (expanding comparison)
@@ -266,21 +269,25 @@ class FXSequenceDataset(Dataset):
 
     Everything downstream (model input, loss, plots) lives in this
     normalized/labeled space; the model never sees a raw return value.
-    `target`'s own dtype selects what it holds: an integer array is a 5-class
-    direction label (`target_mode="class"`, see
-    `fx_forecasting.features.CLASS_NAMES`), stored as `torch.long` for
-    `nn.CrossEntropyLoss`; a float array is a continuous return z-score
-    (`target_mode="zscore"`, see
-    `fx_forecasting.features.compute_target_zscore`), stored as `torch.float32`.
+    `target` holds either a 5-class direction label (`target_mode="class"`, see
+    `fx_forecasting.features.CLASS_NAMES`) stored as `torch.long` for
+    `nn.CrossEntropyLoss`, or a continuous horizon-return z-score
+    (`target_mode="zscore"`) stored as `torch.float32` for an MSE-style regression loss.
     """
 
     def __init__(
-        self, features: np.ndarray, target: np.ndarray, seq_len: int, dates: pd.Index, origin_start: int, origin_end: int
+        self,
+        features: np.ndarray,
+        target: np.ndarray,
+        seq_len: int,
+        dates: pd.Index,
+        origin_start: int,
+        origin_end: int,
+        target_mode: str = "class",
     ) -> None:
         self.features = torch.as_tensor(np.asarray(features).copy(), dtype=torch.float32)
-        target_array = np.asarray(target)
-        target_dtype = torch.long if np.issubdtype(target_array.dtype, np.integer) else torch.float32
-        self.targets = torch.as_tensor(target_array.copy(), dtype=target_dtype)
+        target_dtype = torch.long if target_mode == "class" else torch.float32
+        self.targets = torch.as_tensor(np.asarray(target).copy(), dtype=target_dtype)
         self.seq_len = seq_len
         self.dates = pd.DatetimeIndex(dates)
 
@@ -301,7 +308,7 @@ class FXSequenceDataset(Dataset):
         end = self.valid_indices[idx]
         start = end - self.seq_len + 1
         x = self.features[start : end + 1]
-        y = self.targets[end]  # scalar; nn.CrossEntropyLoss/MSE both expect shape (batch,) after collation
+        y = self.targets[end]  # scalar; collates to shape (batch,), matching both loss functions
         return x, y
 
 
@@ -322,33 +329,46 @@ def build_datasets(
     )
     values = features.to_numpy(dtype=np.float32)
     targets = target.to_numpy()
-    train_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, cfg.seq_len - 1, split.train_end)
-    val_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, split.val_start, split.val_end)
-    test_ds = FXSequenceDataset(values, targets, cfg.seq_len, aligned_index, split.test_start, split.test_end)
+    train_ds = FXSequenceDataset(
+        values, targets, cfg.seq_len, aligned_index, cfg.seq_len - 1, split.train_end, cfg.target_mode
+    )
+    val_ds = FXSequenceDataset(
+        values, targets, cfg.seq_len, aligned_index, split.val_start, split.val_end, cfg.target_mode
+    )
+    test_ds = FXSequenceDataset(
+        values, targets, cfg.seq_len, aligned_index, split.test_start, split.test_end, cfg.target_mode
+    )
     return train_ds, val_ds, test_ds
 
 
 def save_features_csv(
-    features_by_symbol: dict[str, pd.DataFrame], targets_by_symbol: dict[str, pd.Series], path: str
+    features_by_symbol: dict[str, pd.DataFrame],
+    targets_by_symbol: dict[str, pd.Series],
+    path: str,
+    target_mode: str = "class",
 ) -> None:
     """Writes every symbol's normalized model-input features (plus its target) to one long-format CSV.
 
-    Columns: symbol, date, <feature columns>, target — one row per
+    Columns: symbol, date, <feature columns>, target[, target_label] — one row per
     (symbol, date), i.e. exactly the values fed into `FXSequenceDataset`
     before windowing into sequences. `target` is NaN for the last `horizon`
-    days of each symbol, where no forward-looking target exists yet. In
-    `target_mode="class"`, an extra `target_label` column (e.g. "bullish")
-    is added; `target_mode="zscore"` has no discrete label to show.
+    days of each symbol, where no forward-looking target exists yet.
+
+    `target_mode="class"`: `target` is the signed `CLASS_VALUES` (-2..2) representation, not
+    the raw 0-4 training-time class index; `target_label` gives the same class as a name.
+    `target_mode="zscore"`: `target` is the raw continuous horizon-return z-score itself; no
+    `target_label` column (there's no discrete class to name).
     """
     rows = []
     for symbol, features in features_by_symbol.items():
-        raw_target = targets_by_symbol[symbol]
-        is_class_target = pd.api.types.is_integer_dtype(raw_target)  # check before reindex NaN-upcasts to float
+        target_series = targets_by_symbol[symbol].reindex(features.index)
 
         row = features.copy()
-        row["target"] = raw_target.reindex(row.index)
-        if is_class_target:
-            row["target_label"] = row["target"].map(lambda c: CLASS_NAMES[int(c)] if pd.notna(c) else None)
+        if target_mode == "class":
+            row["target"] = target_series.map(lambda c: CLASS_VALUES[int(c)] if pd.notna(c) else None)
+            row["target_label"] = target_series.map(lambda c: CLASS_NAMES[int(c)] if pd.notna(c) else None)
+        else:
+            row["target"] = target_series
         row.insert(0, "symbol", symbol)
         row.index.name = "date"
         rows.append(row.reset_index())
@@ -372,67 +392,61 @@ def build_target_dataset(
     dict[str, pd.DataFrame],
     int,
     int,
-    int,
     list[str],
 ]:
-    """Builds `cfg.target_symbol`'s train/val/test datasets from three column blocks:
+    """Builds `cfg.target_symbol`'s train/val/test datasets from two column blocks:
 
     - The *side-feature* block (leading columns): `target_symbol`-only, non-sequential
       covariates — momentum, realized vol, skew, kurtosis, carry, and intraday volatility —
-      rolling-normalized, but never fed to the LSTM; only their value
-      at the forecast origin (the window's last timestep) is used, injected directly at the
-      model's final prediction layer alongside the attention context (and, if enabled, the
-      spectral summary) — see `fx_forecasting.models.lstm_forecaster`. (Day-over-day volume
-      change was considered too, but FX spot volume from this project's data source
-      (Yahoo/yfinance) is uniformly 0 — forex is OTC with no consolidated tape — so it
-      carries no signal and isn't included.)
-    - The *target-series* block (middle columns): `target_symbol`'s own rolling-normalized
-      log return, as a genuine sequence — concatenated with the D orthogonal cross-asset
-      factors (uncompressed) before the LSTM, so the recurrence has undiluted access to the
-      series it's actually forecasting on top of the shared cross-asset structure the K->D
-      reduction otherwise dilutes it into.
+      rolling-normalized, but never fed to the LSTM; only their value at the forecast origin
+      (the window's last timestep) is used, injected directly into the final feed-forward
+      classifier alongside the LSTM's own output (and, if enabled, the spectral summary and
+      the orthogonal cross-asset snapshot) — see
+      `fx_forecasting.models.lstm_forecaster`. (Day-over-day volume change was considered
+      too, but FX spot volume from this project's data source (Yahoo/yfinance) is uniformly
+      0 — forex is OTC with no consolidated tape — so it carries no signal and isn't
+      included.)
     - The *cross-asset* block (trailing K columns): one column per pair in `cfg.pairs`
       (`xret_{pair}`, including `target_symbol` itself), rolling-normalized log returns, fed
-      through the pretrained orthogonal factor encoder
-      (`fx_forecasting.models.orthogonal_autoencoder`, loaded by `build_model`). Always the
-      *trailing* `len(cfg.pairs)` columns — `LSTMAttentionForecaster.encode` slices on this
-      exact convention.
+      *directly* into the LSTM as a genuine multi-channel sequence (the model's own
+      `cross_asset_encoder` additionally reduces this same block to `factor_dim` orthogonal
+      factors, but only at the last timestep, for the final prediction layer — see
+      `fx_forecasting.models.lstm_forecaster`). Always the *trailing* `len(cfg.pairs)`
+      columns — `LSTMSeqClassifier.forward` slices on this exact convention.
 
-    All three blocks share the same causal rolling z-score (`compute_rolling_normalized_features`,
+    Both blocks share the same causal rolling z-score (`compute_rolling_normalized_features`,
     window `cfg.seq_len`) and the same purged train/val/test split
     (`fx_forecasting.trading.purged_train_val_test_split`) as every other stage in this
     pipeline — see `build_datasets` for why the split is embargoed.
 
     The *target* itself (not an input column) is `target_symbol`'s own absolute horizon-day
-    return by default, or — if `cfg.cross_sectional_target` — its return *relative to* the
-    cross-sectional median of every other `cfg.pairs` symbol over the same horizon (did
+    return class by default, or — if `cfg.cross_sectional_target` — its return *relative to*
+    the cross-sectional median of every other `cfg.pairs` symbol over the same horizon (did
     `target_symbol` outperform the rest of the universe, rather than did it go up at all; see
     `fx_forecasting.features.compute_cross_sectional_target_zscore`). Input features are
     identical either way — only the target construction, and what
-    `market_data_by_symbol[symbol]["horizon_zscore"]` judges a `target_mode="class"` hit
-    against, changes. The execution backtest (`log_and_plot_strategy_pnl`) is unaffected
-    either way: it still sizes an absolute position in `target_symbol` off whatever signal the
-    model produces and realizes PnL against `target_symbol`'s own next-day return — under
+    `market_data_by_symbol[symbol]["horizon_zscore"]` judges a hit against, changes. The
+    execution backtest (`log_and_plot_strategy_pnl`) is unaffected either way: it still sizes
+    an absolute position in `target_symbol` off whatever signal the model produces and
+    realizes PnL against `target_symbol`'s own next-day return — under
     `cross_sectional_target=True` that means using a relative-outperformance-trained signal as
     a directional timing cue on the symbol itself, not a market-neutral pairs trade against
     the peer basket.
 
     Returns `(train_ds, val_ds, test_ds, train_datasets_by_symbol, val_datasets_by_symbol,
     test_datasets_by_symbol, market_data_by_symbol, num_factors, num_side_features,
-    num_target_series, feature_names)` — `feature_names` is `normalized`'s own column order
-    (side features, then target series, then `xret_*`), the same convention
-    `LSTMAttentionForecaster.encode` slices on positionally; exposed here so callers that need
-    to know which raw column a given tensor position corresponds to (e.g. feature-importance
-    reporting for a non-sequence model trained on the same tabular data — see
-    `gbt_baseline.py`) don't have to re-derive the column-ordering convention themselves. The
-    `*_by_symbol` dicts always have exactly one entry (`{cfg.target_symbol: ...}`), kept as
-    dicts so `plot_predictions_grid`/
+    feature_names)` — `feature_names` is `normalized`'s own column order (side features, then
+    `xret_*`), the same convention `LSTMSeqClassifier.forward` slices on positionally;
+    exposed here so callers that need to know which raw column a given tensor position
+    corresponds to don't have to re-derive the column-ordering convention themselves. The
+    `*_by_symbol` dicts always have exactly one entry
+    (`{cfg.target_symbol: ...}`), kept as dicts so `plot_predictions_grid`/
     `log_hit_rate_summary`/`log_and_plot_strategy_pnl`/`plot_positions_and_pnl` (which already
     only ever expected one symbol under the old optional `target_symbol` mode) need no
     changes. `market_data_by_symbol[symbol]` carries `next_log_return` (actual next-day
     executable return — the backtest's return leg), `daily_carry` (the backtest's carry leg),
-    and `horizon_zscore` (the continuous return z-score `log_hit_rate_summary` judges a
-    `target_mode="class"` hit against).
+    and `horizon_zscore` (the continuous return z-score `log_hit_rate_summary` judges a hit
+    against).
 
     `raw`: pre-fetched `RawPanels` to reuse instead of hitting Postgres again
     (see `load_raw_panels`) — e.g. across many hyperparameter-search trials
@@ -453,51 +467,44 @@ def build_target_dataset(
     engineered = compute_engineered_features(panel, log_returns, high, low, cfg.momentum_window, cfg.vol_window)
     carry = compute_carry_feature(cfg.pairs, rates)
 
-    # build_symbol_frame's own first column is always the symbol's raw "return" — split off
-    # into its own target-series block (below) rather than treated as an FFN-only side
-    # feature, since it now feeds the LSTM directly as a sequence.
-    side_frame_full = build_symbol_frame(
+    # build_symbol_frame's own first column is always the symbol's raw "return" — dropped
+    # here since it's cross-asset-return information already carried by xret_{symbol} below
+    # (which, unlike here, feeds the LSTM directly as a sequence).
+    side_frame = build_symbol_frame(
         symbol, log_returns, engineered, cfg.momentum_window, cfg.vol_window, carry=carry[symbol],
-    )
-    target_series_frame = side_frame_full[["return"]].rename(columns={"return": "target_log_return"})
-    target_series_columns = list(target_series_frame.columns)
-    side_frame = side_frame_full.drop(columns=["return"])
+    ).drop(columns=["return"])
     side_columns = list(side_frame.columns)
 
     # Cross-asset block: one column per pair (including self), raw log returns.
     xret_columns = [f"xret_{pair}" for pair in sorted(cfg.pairs)]
     xret_frame = pd.DataFrame({col: log_returns[pair] for col, pair in zip(xret_columns, sorted(cfg.pairs))})
 
-    raw_frame = pd.concat(
-        [side_frame, target_series_frame, xret_frame], axis=1, sort=False
-    ).dropna(how="any")
+    raw_frame = pd.concat([side_frame, xret_frame], axis=1, sort=False).dropna(how="any")
     normalized = compute_rolling_normalized_features(raw_frame, cfg.seq_len)
     # Guarantee column order regardless of how pd.concat/dropna ordered things above — side
-    # features first, then the target series, then xret_* last (trailing K) — the model's
-    # encode() slices on this exact convention.
-    normalized = normalized[side_columns + target_series_columns + xret_columns]
+    # features first, xret_* last (trailing K) — the model's encode() slices on this.
+    normalized = normalized[side_columns + xret_columns]
     num_side_features = len(side_columns)
-    num_target_series = len(target_series_columns)
     num_factors = normalized.shape[1]
 
     peer_symbols = [p for p in cfg.pairs if p != symbol]
     if cfg.cross_sectional_target:
         if not peer_symbols:
             raise ValueError("cross_sectional_target=True needs at least one other pair in cfg.pairs besides target_symbol")
-        if cfg.target_mode == "class":
-            target = compute_cross_sectional_target_class(panel, log_returns, symbol, peer_symbols, cfg.horizon, cfg.seq_len)
-        else:
-            target = compute_cross_sectional_target_zscore(panel, log_returns, symbol, peer_symbols, cfg.horizon, cfg.seq_len)
+        class_target = compute_cross_sectional_target_class(panel, log_returns, symbol, peer_symbols, cfg.horizon, cfg.seq_len)
         horizon_zscore = compute_cross_sectional_target_zscore(panel, log_returns, symbol, peer_symbols, cfg.horizon, cfg.seq_len)
     else:
-        if cfg.target_mode == "class":
-            target = compute_target_class(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
-        else:
-            target = compute_target_zscore(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
+        class_target = compute_target_class(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
         horizon_zscore = compute_target_zscore(panel, log_returns, symbol, cfg.horizon, cfg.seq_len)
 
+    # "class": train against the discretized direction class. "zscore": train directly
+    # against the continuous return z-score itself (the same series `horizon_zscore` always
+    # carries, kept separately below for the hit-rate diagnostic regardless of which mode
+    # actually trained the model — see log_hit_rate_summary/compute_hit_rate).
+    target = class_target if cfg.target_mode == "class" else horizon_zscore
+
     if cfg.write_features_csv:
-        save_features_csv({symbol: normalized}, {symbol: target}, cfg.features_csv_path)
+        save_features_csv({symbol: normalized}, {symbol: target}, cfg.features_csv_path, cfg.target_mode)
 
     train_ds, val_ds, test_ds = build_datasets(normalized, target, cfg)
 
@@ -522,9 +529,8 @@ def build_target_dataset(
         market_data_by_symbol[symbol]["market_vol_regime"] = market_vol_regime.reindex(aligned_index)
 
     logger.info(
-        "%s: %d factors (%d cross-asset + %d target series + %d side), train=%d, val=%d, test=%d",
-        symbol, num_factors, len(cfg.pairs), num_target_series, num_side_features,
-        len(train_ds), len(val_ds), len(test_ds),
+        "%s: %d factors (%d cross-asset + %d side), train=%d, val=%d, test=%d",
+        symbol, num_factors, len(cfg.pairs), num_side_features, len(train_ds), len(val_ds), len(test_ds),
     )
 
     return (
@@ -537,14 +543,11 @@ def build_target_dataset(
         market_data_by_symbol,
         num_factors,
         num_side_features,
-        num_target_series,
-        side_columns + target_series_columns + xret_columns,
+        side_columns + xret_columns,
     )
 
 
-def build_model(
-    cfg: Config, num_factors: int, num_side_features: int, num_target_series: int
-) -> LSTMAttentionForecaster:
+def build_model(cfg: Config, num_factors: int, num_side_features: int) -> LSTMSeqClassifier:
     """Constructs the model and loads the pretrained cross-asset factor encoder into it.
 
     `cfg.autoencoder_path` must point to a checkpoint written by `pretrain_autoencoder.py`
@@ -574,21 +577,20 @@ def build_model(
         )
     factor_dim = checkpoint["factor_dim"]
 
-    model = LSTMAttentionForecaster(
+    model = LSTMSeqClassifier(
         num_factors=num_factors,
         output_size=output_size,
         num_cross_asset_factors=num_cross_asset_factors,
         factor_dim=factor_dim,
         num_side_features=num_side_features,
-        num_target_series=num_target_series,
         forecast_horizon=1,
         hidden_size=cfg.hidden_size,
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
-        predict_uncertainty=cfg.predict_uncertainty,
         use_spectral_features=cfg.use_spectral_features,
         spectral_embedding_dim=cfg.spectral_embedding_dim,
         spectral_freq_bins=cfg.spectral_freq_bins,
+        target_mode=cfg.target_mode,
     ).to(cfg.device)
     model.cross_asset_encoder.load_state_dict(checkpoint["encoder_state"])
     if cfg.freeze_autoencoder:
@@ -597,17 +599,17 @@ def build_model(
 
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    target_desc = f"{len(CLASS_NAMES)}-class direction" if cfg.target_mode == "class" else "z-score regression"
+    target_desc = f"{output_size}-class direction" if cfg.target_mode == "class" else "continuous z-score"
     logger.info(
-        "Model: %d cross-asset factors -> %d orthogonal (%s) + %d target series, %d side features, "
-        "%d-day %s target, %d params (%d trainable)",
+        "Model: %d cross-asset factors -> LSTM directly, %d orthogonal (%s) -> FFN, %d side "
+        "features, %d-day %s target, %d params (%d trainable)",
         num_cross_asset_factors, factor_dim, "frozen" if cfg.freeze_autoencoder else "fine-tuned",
-        num_target_series, num_side_features, cfg.horizon, target_desc, n_params, n_trainable,
+        num_side_features, cfg.horizon, target_desc, n_params, n_trainable,
     )
     return model
 
 
-def save_model(model: LSTMAttentionForecaster, cfg: Config, num_factors: int, path: str) -> None:
+def save_model(model: LSTMSeqClassifier, cfg: Config, num_factors: int, path: str) -> None:
     """Saves weights plus the architecture/config needed to reconstruct the model for inference.
 
     The cross-asset encoder's weights (frozen or fine-tuned) are already part of
@@ -620,14 +622,12 @@ def save_model(model: LSTMAttentionForecaster, cfg: Config, num_factors: int, pa
         "num_cross_asset_factors": model.num_cross_asset_factors,
         "factor_dim": model.factor_dim,
         "num_side_features": model.num_side_features,
-        "num_target_series": model.num_target_series,
         "output_size": model.output_size,
         "target_mode": cfg.target_mode,
         "cross_sectional_target": cfg.cross_sectional_target,
         "hidden_size": cfg.hidden_size,
         "num_layers": cfg.num_layers,
         "dropout": cfg.dropout,
-        "predict_uncertainty": cfg.predict_uncertainty,
         "use_spectral_features": cfg.use_spectral_features,
         "spectral_embedding_dim": cfg.spectral_embedding_dim,
         "spectral_freq_bins": cfg.spectral_freq_bins,
@@ -644,29 +644,28 @@ def save_model(model: LSTMAttentionForecaster, cfg: Config, num_factors: int, pa
     logger.info("Saved model checkpoint to %s", path_obj)
 
 
-def load_model(path: str, device: str) -> tuple[LSTMAttentionForecaster, dict]:
+def load_model(path: str, device: str) -> tuple[LSTMSeqClassifier, dict]:
     """Loads a checkpoint saved by `save_model` and rebuilds the model architecture around it."""
     checkpoint = torch.load(path, map_location=device, weights_only=False)
-    model = LSTMAttentionForecaster(
+    model = LSTMSeqClassifier(
         num_factors=checkpoint["num_factors"],
         output_size=checkpoint["output_size"],
         num_cross_asset_factors=checkpoint["num_cross_asset_factors"],
         factor_dim=checkpoint["factor_dim"],
         num_side_features=checkpoint.get("num_side_features", 0),
-        num_target_series=checkpoint.get("num_target_series", 0),
         forecast_horizon=1,
         hidden_size=checkpoint["hidden_size"],
         num_layers=checkpoint["num_layers"],
         dropout=checkpoint["dropout"],
-        predict_uncertainty=checkpoint.get("predict_uncertainty", False),
         use_spectral_features=checkpoint.get("use_spectral_features", False),
         spectral_embedding_dim=checkpoint.get("spectral_embedding_dim", 8),
         spectral_freq_bins=checkpoint.get("spectral_freq_bins", 16),
+        target_mode=checkpoint.get("target_mode", "class"),
     ).to(device)
     model.load_state_dict(checkpoint["model_state"])
     logger.info(
-        "Loaded model checkpoint from %s (pairs=%s, horizon=%s, seq_len=%s, target_mode=%s)",
-        path, checkpoint["pairs"], checkpoint["horizon"], checkpoint["seq_len"], checkpoint["target_mode"],
+        "Loaded model checkpoint from %s (pairs=%s, horizon=%s, seq_len=%s)",
+        path, checkpoint["pairs"], checkpoint["horizon"], checkpoint["seq_len"],
     )
     return model, checkpoint
 
@@ -674,7 +673,8 @@ def load_model(path: str, device: str) -> tuple[LSTMAttentionForecaster, dict]:
 def describe_batch(x: torch.Tensor, y: torch.Tensor) -> None:
     """One-shot printout of a training batch, meant to be eyeballed or breakpointed on."""
     logger.info("Batch x: shape=%s dtype=%s mean=%.4f std=%.4f", tuple(x.shape), x.dtype, x.mean().item(), x.std().item())
-    # y holds integer class indices; torch.mean/std require a floating dtype.
+    # y holds integer class indices (target_mode="class") or float z-scores ("zscore");
+    # torch.mean/std require a floating dtype either way.
     logger.info(
         "Batch y: shape=%s dtype=%s mean=%.4f std=%.4f", tuple(y.shape), y.dtype, y.float().mean().item(), y.float().std().item()
     )
@@ -696,55 +696,32 @@ def class_distance_weights(outlier_weight: float, num_classes: int) -> torch.Ten
     return 1.0 + outlier_weight * (distances.abs() / neutral)
 
 
-def weighted_mse_loss(pred: torch.Tensor, target: torch.Tensor, outlier_weight: float) -> torch.Tensor:
-    """MSE weighted so targets far from neutral (z=0) count more.
-
-    The z-score target is mapped through the standard normal CDF to get a
-    bounded (0,1) "quantile" purely for weighting purposes (the regression
-    target itself stays the raw unbounded z-score): weight(z) = 1 +
-    outlier_weight * |2*Phi(z) - 1|, ranging from 1 near the median (z≈0) up
-    to 1 + outlier_weight at the extremes — the continuous-space analogue of
-    `class_distance_weights`. `outlier_weight=0` recovers plain MSE.
+def weighted_mse_loss(output: torch.Tensor, target: torch.Tensor, outlier_weight: float) -> torch.Tensor:
+    """MSE loss weighted up for large-magnitude targets, the `target_mode="zscore"` analogue
+    of `class_distance_weights`: weight(target) = 1 + outlier_weight * min(|target|, 3) / 3,
+    ranging from 1 near a neutral (small-|z|) day up to 1 + outlier_weight at |z| >= 3 —
+    prioritizing accuracy on large realized moves over the far more common near-neutral days,
+    the same trading-relevant emphasis `class_distance_weights` gives the classification loss.
+    `outlier_weight=0` recovers plain MSE.
     """
-    phi = 0.5 * (1.0 + torch.erf(target / math.sqrt(2.0)))
-    weight = 1.0 + outlier_weight * (2.0 * phi - 1.0).abs()
-    return (weight * (pred - target) ** 2).mean()
-
-
-def variance_penalty(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Penalizes the batch-level gap between predicted and actual standard deviation.
-
-    Plain MSE has no incentive to keep any prediction spread once it's found
-    that hedging near the target's mean (z≈0) minimizes average error under a
-    noisy/weak-signal target — the classic regression-to-the-mean collapse.
-    This term directly punishes that: `(std(pred) - std(target))**2`, added
-    to the MSE loss with weight `Config.variance_penalty_weight`, forces
-    predictions to keep a spread comparable to the real target's, at the
-    cost of some calibration. `unbiased=False` avoids NaN on a batch of size 1.
-    """
-    return (pred.std(unbiased=False) - target.std(unbiased=False)) ** 2
-
-
-def gaussian_nll_loss(pred: torch.Tensor, log_variance: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Gaussian negative log likelihood for a mean forecast and conditional uncertainty."""
-    return 0.5 * (torch.exp(-log_variance) * (pred - target).square() + log_variance).mean()
+    weights = 1.0 + outlier_weight * (target.abs().clamp(max=3.0) / 3.0)
+    return (weights * (output - target) ** 2).mean()
 
 
 def run_epoch(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     loader: DataLoader,
     cfg: Config,
     optimizer: torch.optim.Optimizer | None,
 ) -> tuple[float, float]:
     """Runs one pass over `loader`. Trains if `optimizer` is given, else evaluates.
 
-    Returns (weighted loss, plain hit rate) — see `compute_hit_rate` for what
-    "hit" means in each `cfg.target_mode`. Loss is weighted per
-    `class_distance_weights` (`target_mode="class"`) or `weighted_mse_loss`
-    plus `variance_penalty` (`target_mode="zscore"`) — outlier-focused and
-    collapse-resistant respectively, together the actual optimization
-    target; hit rate stays a plain, unweighted diagnostic for comparability
-    across runs.
+    Returns (loss, plain hit rate). `target_mode="class"`: class-distance-weighted
+    cross-entropy loss (`class_distance_weights`), hit = exact argmax-class match.
+    `target_mode="zscore"`: magnitude-weighted MSE loss (`weighted_mse_loss`), hit = sign
+    match between the predicted and actual continuous z-score. Either way, hit rate stays a
+    plain, unweighted diagnostic for comparability across runs — see `compute_hit_rate` for
+    the more nuanced (neutral-band-aware) version used for the real out-of-sample summary.
     """
     is_train = optimizer is not None
     model.train(is_train)
@@ -759,27 +736,13 @@ def run_epoch(
         x, y = x.to(cfg.device), y.to(cfg.device)
 
         with torch.set_grad_enabled(is_train):
-            output = model(x, return_uncertainty=cfg.predict_uncertainty and cfg.target_mode == "zscore")
+            output = model(x)
             if cfg.target_mode == "class":
                 loss = ce_loss_fn(output, y)
                 hits = output.argmax(dim=-1) == y
             else:
-                if cfg.predict_uncertainty:
-                    mean, log_variance = output
-                    pred = mean.squeeze(-1)
-                    loss = gaussian_nll_loss(pred, log_variance.squeeze(-1), y)
-                else:
-                    pred = output.squeeze(-1)
-                    loss = weighted_mse_loss(pred, y, cfg.outlier_weight)
-                # Applies regardless of which loss path is active: Gaussian NLL alone lets the
-                # model cheaply minimize loss by predicting a near-constant mean and inflating
-                # its own uncertainty to explain away the resulting errors (Seitzer et al. 2022,
-                # "On the Pitfalls of Heteroscedastic Uncertainty Estimation") rather than
-                # learning genuine directional signal in the mean itself — the same mean-collapse
-                # this penalty guards against under plain MSE.
-                if cfg.variance_penalty_weight:
-                    loss = loss + cfg.variance_penalty_weight * variance_penalty(pred, y)
-                hits = pred.sign() == y.sign()
+                loss = weighted_mse_loss(output, y, cfg.outlier_weight)
+                hits = torch.sign(output) == torch.sign(y)
 
             if is_train:
                 optimizer.zero_grad()
@@ -796,12 +759,17 @@ def run_epoch(
 
 
 def collect_predictions(
-    model: LSTMAttentionForecaster, dataset: FXSequenceDataset, cfg: Config
+    model: LSTMSeqClassifier, dataset: FXSequenceDataset, cfg: Config
 ) -> tuple[np.ndarray, np.ndarray]:
     """Runs the model over `dataset` in time order; returns (actual, predicted), shape (n,).
 
-    `predicted` is the argmax class (`target_mode="class"`) or the raw
-    predicted z-score (`target_mode="zscore"`), not raw logits.
+    `target_mode="class"`: both are the signed `CLASS_VALUES` (-2..2) representation of the
+    class — `dataset.targets` and the model's own argmax logits are internally 0-4 indices
+    (what `nn.CrossEntropyLoss`/`nn.Embedding` require), remapped here so a caller-visible
+    prediction's numeric value already carries its long/short sign directly, without needing
+    `CLASS_NAMES.index(...)` lookups downstream. `target_mode="zscore"`: both are the raw
+    continuous z-score the model was trained on/against — no remapping needed, since the
+    model's own output already lives directly in that space.
     """
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
     model.eval()
@@ -810,58 +778,70 @@ def collect_predictions(
         for x, y in loader:
             output = model(x.to(cfg.device)).cpu()
             actual_batches.append(y)
-            pred_batches.append(output.argmax(dim=-1) if cfg.target_mode == "class" else output.squeeze(-1))
+            pred_batches.append(output.argmax(dim=-1) if cfg.target_mode == "class" else output)
 
-    actual = torch.cat(actual_batches).numpy()
-    predicted = torch.cat(pred_batches).numpy()
+    if cfg.target_mode == "class":
+        class_values = np.asarray(CLASS_VALUES)
+        actual = class_values[torch.cat(actual_batches).numpy()]
+        predicted = class_values[torch.cat(pred_batches).numpy()]
+    else:
+        actual = torch.cat(actual_batches).numpy()
+        predicted = torch.cat(pred_batches).numpy()
     return actual, predicted
 
 
-def collect_signal(model: LSTMAttentionForecaster, dataset: FXSequenceDataset, cfg: Config) -> np.ndarray:
-    """Risk-adjusted trading signal s_t for every sample in `dataset`, time-ordered — the
+def collect_signal(model: LSTMSeqClassifier, dataset: FXSequenceDataset, cfg: Config) -> np.ndarray:
+    """Risk-graded trading signal s_t for every sample in `dataset`, time-ordered — the
     quantity `fx_forecasting.trading.positions_from_signal` sizes a position from.
 
-    `cfg.predict_uncertainty=False`: the model's predicted return z-score is
-    already risk-adjusted (its target is standardized by trailing realized
-    volatility), so it's used directly as the signal.
+    `target_mode="class"`: s_t = E[class_score | x_t] = sum_i(class_score_i * P(class_i | x_t)),
+    the expected value of the model's predicted class distribution under a fixed, symmetric
+    per-class score (very_bearish=-2, bearish=-1, neutral=0, bullish=1, very_bullish=2 for the
+    default 5-class setup) — a continuous, conviction-weighted summary of the model's *entire*
+    predicted distribution, not just its argmax class. A distribution split evenly between
+    very_bullish and very_bearish gives s_t=0, same as a confident neutral call, but a
+    lopsided distribution leaning bullish gives a positive s_t proportional to how lopsided
+    it is — so position sizing naturally scales with the model's own conviction.
 
-    `cfg.predict_uncertainty=True`: divides the model's own predicted mean by
-    its own predicted std (`exp(0.5 * log_variance)`), i.e. s_t = mu_hat/sigma_hat
-    — a low-confidence prediction (wide predicted uncertainty) shrinks the
-    signal even before thresholding/leverage are applied, rather than sizing
-    a position purely off the point estimate.
+    `target_mode="zscore"`: s_t is simply the model's own raw continuous output — it already
+    *is* a directly predicted z-score, no distribution to take an expectation over.
     """
-    if cfg.target_mode != "zscore":
-        raise ValueError("collect_signal only supports target_mode='zscore'")
+    if cfg.target_mode == "class" and model.output_size != len(CLASS_VALUES):
+        raise ValueError(
+            f"model.output_size ({model.output_size}) doesn't match len(CLASS_VALUES) "
+            f"({len(CLASS_VALUES)}); collect_signal assumes the model's logits are ordered "
+            f"exactly like fx_forecasting.features.CLASS_NAMES/CLASS_VALUES."
+        )
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False, num_workers=0)
     model.eval()
+    class_scores = torch.as_tensor(CLASS_VALUES, dtype=torch.float32, device=cfg.device)
     signal_batches = []
     with torch.no_grad():
         for x, _y in loader:
-            if cfg.predict_uncertainty:
-                mean, log_variance = model(x.to(cfg.device), return_uncertainty=True)
-                sigma = torch.exp(0.5 * log_variance).clamp_min(1e-3)
-                signal = (mean / sigma).squeeze(-1)
+            output = model(x.to(cfg.device))
+            if cfg.target_mode == "class":
+                probs = torch.softmax(output, dim=-1)
+                signal = (probs * class_scores).sum(dim=-1)
             else:
-                signal = model(x.to(cfg.device)).squeeze(-1)
+                signal = output
             signal_batches.append(signal.cpu())
     return torch.cat(signal_batches).numpy()
 
 
 def fit_signal_calibrators(
-    model: LSTMAttentionForecaster, train_datasets: dict[str, FXSequenceDataset], cfg: Config
+    model: LSTMSeqClassifier, train_datasets: dict[str, FXSequenceDataset], cfg: Config
 ) -> dict[str, LinearCalibrator]:
     """Per symbol, an affine calibration (`fx_forecasting.trading.fit_linear_calibrator`)
     mapping the model's own raw training-set signal (`collect_signal`) onto what actually
-    realized on the training set — corrects systematic over/under-scaling before the signal is
-    used for position sizing (a raw model output minimizing a training loss has no guarantee of
-    being correctly *scaled* for sizing, only correctly *ordered*). Fit only on the training
-    fold, then reused unchanged for both validation and the final test holdout in
-    `log_and_plot_strategy_pnl`, so no information from either split ever leaks into the
-    calibration itself. No-op (empty dict) outside `target_mode="zscore"`.
+    realized on the training set (`collect_predictions`'s `actual` — the signed class value
+    under `target_mode="class"`, or the raw z-score itself under `target_mode="zscore"`) —
+    corrects systematic over/under-scaling before the signal is used for position sizing (a
+    raw model output minimizing a training loss has
+    no guarantee of being correctly *scaled* for sizing, only correctly *ordered*). Fit only
+    on the training fold, then reused unchanged for both validation and the final test
+    holdout in `log_and_plot_strategy_pnl`, so no information from either split ever leaks
+    into the calibration itself.
     """
-    if cfg.target_mode != "zscore":
-        return {}
     calibrators: dict[str, LinearCalibrator] = {}
     for symbol, dataset in train_datasets.items():
         actual, _predicted = collect_predictions(model, dataset, cfg)
@@ -883,44 +863,35 @@ _NEUTRAL_ZSCORE_LOW = float(norm.ppf(CLASS_QUANTILE_EDGES[2]))
 _NEUTRAL_ZSCORE_HIGH = float(norm.ppf(CLASS_QUANTILE_EDGES[3]))
 
 
-def compute_hit_rate(predicted: np.ndarray, actual_zscore: np.ndarray, target_mode: str) -> float:
+def compute_hit_rate(predicted: np.ndarray, actual_zscore: np.ndarray) -> float:
     """Fraction of samples where the prediction "called it right".
 
-    `target_mode="zscore"`: same-sign match (both predicted and actual
-    z-score fall on the same side of zero) — the natural direction-call
-    analogue for a continuous target.
-
-    `target_mode="class"`: rather than requiring an exact predicted-class
-    match (too strict — e.g. predicting "bullish" when the actual outcome is
-    "very_bullish" is still a correct directional call), a hit is instead:
-    a bearish prediction (`very_bearish`/`bearish`) with `actual_zscore < 0`,
-    a bullish prediction (`bullish`/`very_bullish`) with `actual_zscore > 0`,
-    or a neutral prediction with `actual_zscore` inside the neutral band
-    (`_NEUTRAL_ZSCORE_LOW`..`_NEUTRAL_ZSCORE_HIGH`, matching the same band
-    `compute_target_class` itself uses for the neutral class). `predicted`
-    is still the discrete class index (argmax) in this mode — only the
-    "actual" side is judged continuously, via `actual_zscore` (see
-    `build_target_dataset`'s `market_data_by_symbol["horizon_zscore"]`), not
-    the discretized class label.
+    `predicted` is expected in the signed `CLASS_VALUES` (-2..2) representation, neutral=0
+    (see `collect_predictions`) — *not* the raw 0-4 training-time class index. Rather than
+    requiring an exact predicted-class match (too strict — e.g. predicting "bullish" when the
+    actual outcome is "very_bullish" is still a correct directional call), a hit is instead: a
+    bearish prediction (`predicted < 0`) with `actual_zscore < 0`, a bullish prediction
+    (`predicted > 0`) with `actual_zscore > 0`, or a neutral prediction (`predicted == 0`)
+    with `actual_zscore` inside the neutral band (`_NEUTRAL_ZSCORE_LOW`..`_NEUTRAL_ZSCORE_HIGH`,
+    matching the same band `compute_target_class` itself uses for the neutral class). Only the
+    "actual" side is judged continuously, via `actual_zscore` (see `build_target_dataset`'s
+    `market_data_by_symbol["horizon_zscore"]`), not a discretized class label.
 
     This is the metric a trading strategy actually cares about — distinct
     from (and often more informative than) the loss used to train/select the
     model. See `log_naive_baseline` for the real no-skill bar to compare
-    against (not a flat 50%/20%, since classes are imbalanced by design).
+    against (not a flat 20%, since classes are imbalanced by design).
     """
-    if target_mode == "class":
-        neutral_class = CLASS_NAMES.index("neutral")
-        bearish_hit = (predicted < neutral_class) & (actual_zscore < 0)
-        bullish_hit = (predicted > neutral_class) & (actual_zscore > 0)
-        neutral_hit = (predicted == neutral_class) & (actual_zscore >= _NEUTRAL_ZSCORE_LOW) & (
-            actual_zscore <= _NEUTRAL_ZSCORE_HIGH
-        )
-        return float(np.mean(bearish_hit | bullish_hit | neutral_hit))
-    return float(np.mean(np.sign(predicted) == np.sign(actual_zscore)))
+    bearish_hit = (predicted < 0) & (actual_zscore < 0)
+    bullish_hit = (predicted > 0) & (actual_zscore > 0)
+    neutral_hit = (predicted == 0) & (actual_zscore >= _NEUTRAL_ZSCORE_LOW) & (
+        actual_zscore <= _NEUTRAL_ZSCORE_HIGH
+    )
+    return float(np.mean(bearish_hit | bullish_hit | neutral_hit))
 
 
 def log_hit_rate_summary(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     datasets: dict[str, FXSequenceDataset],
     market_data_by_symbol: dict[str, pd.DataFrame],
     cfg: Config,
@@ -933,24 +904,17 @@ def log_hit_rate_summary(
     is just for the log line. Compare against `log_naive_baseline`'s
     baseline accuracy for the real no-skill bar.
     """
-    if cfg.target_mode == "class":
-        metric = "bearish/bullish sign match, neutral band match — see compute_hit_rate"
-    else:
-        metric = "sign(predicted) == sign(actual)"
-    logger.info("Hit rate (%s, %s):", label, metric)
+    logger.info("Hit rate (%s, bearish/bullish sign match, neutral band match — see compute_hit_rate):", label)
     all_predicted, all_zscore = [], []
     for symbol, dataset in datasets.items():
-        actual, predicted = collect_predictions(model, dataset, cfg)
-        if cfg.target_mode == "class":
-            actual_zscore = market_data_by_symbol[symbol]["horizon_zscore"].reindex(dataset.sample_dates).to_numpy()
-        else:
-            actual_zscore = actual
-        hit_rate = compute_hit_rate(predicted, actual_zscore, cfg.target_mode)
-        logger.info("  %-8s hit_rate=%5.1f%%  (n=%d)", symbol, hit_rate * 100, len(actual))
+        _actual, predicted = collect_predictions(model, dataset, cfg)
+        actual_zscore = market_data_by_symbol[symbol]["horizon_zscore"].reindex(dataset.sample_dates).to_numpy()
+        hit_rate = compute_hit_rate(predicted, actual_zscore)
+        logger.info("  %-8s hit_rate=%5.1f%%  (n=%d)", symbol, hit_rate * 100, len(predicted))
         all_predicted.append(predicted)
         all_zscore.append(actual_zscore)
 
-    pooled_hit_rate = compute_hit_rate(np.concatenate(all_predicted), np.concatenate(all_zscore), cfg.target_mode)
+    pooled_hit_rate = compute_hit_rate(np.concatenate(all_predicted), np.concatenate(all_zscore))
     logger.info(
         "  %-8s hit_rate=%5.1f%%  (n=%d, pooled across %d symbols)",
         "ALL", pooled_hit_rate * 100, sum(len(a) for a in all_predicted), len(datasets),
@@ -972,7 +936,7 @@ def smooth_weights(weights: np.ndarray, window: int) -> np.ndarray:
 
 
 def compute_positions_and_pnl(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     dataset: FXSequenceDataset,
     symbol: str,
     market: pd.DataFrame,
@@ -1013,7 +977,7 @@ def compute_positions_and_pnl(
 
 
 def log_and_plot_strategy_pnl(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     datasets: dict[str, FXSequenceDataset],
     market_data_by_symbol: dict[str, pd.DataFrame],
     calibrators: dict[str, LinearCalibrator],
@@ -1026,13 +990,14 @@ def log_and_plot_strategy_pnl(
 
     Position sizing (`fx_forecasting.trading.positions_from_signal`):
     `w_t = clip(leverage * s_t, -max_position, max_position) * 1(|s_t| > threshold)`, where
-    `s_t` is the model's own risk-adjusted signal (`collect_signal`), affine-calibrated against
-    what actually realized on the *training* fold only (`calibrators`, see
-    `fit_signal_calibrators` — never re-fit here, so nothing from this split leaks into the
-    calibration), then smoothed over `cfg.horizon` days (`smooth_weights`) to damp the turnover
-    the target's own overlapping-horizon noise would otherwise cause. Below `signal_threshold`
-    the position is flat (0) rather than a small noisy bet — trading only when the model claims
-    enough edge to plausibly clear costs.
+    `s_t` is the model's own risk-graded signal (`collect_signal`, the expected value of the
+    predicted class distribution), affine-calibrated against what actually realized on the
+    *training* fold only (`calibrators`, see `fit_signal_calibrators` — never re-fit here, so
+    nothing from this split leaks into the calibration), then smoothed over `cfg.horizon`
+    days (`smooth_weights`) to damp the turnover the target's own overlapping-horizon noise
+    would otherwise cause. Below `signal_threshold` the position is flat (0) rather than a
+    small noisy bet — trading only when the model claims enough edge to plausibly clear
+    costs.
 
     PnL (`fx_forecasting.trading.net_strategy_returns`): `gross_t = w_{t-1} * r_t` using the
     *actual* next-day executable log return (`market_data_by_symbol[symbol]["next_log_return"]`,
@@ -1043,18 +1008,11 @@ def log_and_plot_strategy_pnl(
     joined by date (`pd.concat(..., axis=1)`), not truncated to the shortest symbol's length, so
     the pooled portfolio only ever averages days where a symbol actually has a position.
 
-    Only meaningful for `target_mode="zscore"` (a continuous signal to size a position with);
-    skipped for `target_mode="class"`.
-
     Also writes a `date, symbol, net_cumulative` sidecar CSV next to `path`
     (same name, `.csv` extension), pooled series included under
     `symbol="ALL"` — `dashboard.py` reads this for an interactive
     (zoomable, hoverable) version instead of just embedding this static PNG.
     """
-    if cfg.target_mode != "zscore":
-        logger.info("Skipping strategy PnL backtest: requires target_mode='zscore' (got %r).", cfg.target_mode)
-        return
-
     symbols = list(datasets.keys())
     net_by_symbol: dict[str, pd.DataFrame] = {}
 
@@ -1119,7 +1077,7 @@ def log_and_plot_strategy_pnl(
 
 
 def plot_positions_and_pnl(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     datasets: dict[str, FXSequenceDataset],
     market_data_by_symbol: dict[str, pd.DataFrame],
     calibrators: dict[str, LinearCalibrator],
@@ -1142,17 +1100,12 @@ def plot_positions_and_pnl(
 
     Shares `compute_positions_and_pnl` with `log_and_plot_strategy_pnl` — same signal,
     calibration, smoothing, and position sizing, so this is a detail view of the same
-    backtest, not a separate one. Only meaningful for `target_mode="zscore"`; skipped for
-    `target_mode="class"`.
+    backtest, not a separate one.
 
     Also writes a `date, symbol, position, daily_return, pnl_with_costs, pnl_without_costs`
     sidecar CSV next to `path` (same name, `.csv` extension) — `dashboard.py` reads this for
     an interactive version instead of just embedding this static PNG.
     """
-    if cfg.target_mode != "zscore":
-        logger.info("Skipping positions/PnL plot: requires target_mode='zscore' (got %r).", cfg.target_mode)
-        return
-
     symbols = list(datasets.keys())
     fig, axes = plt.subplots(len(symbols), 1, figsize=(12, 3.5 * len(symbols)), sharex=False, squeeze=False)
     csv_rows = []
@@ -1222,88 +1175,69 @@ def collect_targets(dataset: Dataset) -> np.ndarray:
 def log_naive_baseline(train_ds: Dataset, val_ds: Dataset, cfg: Config, output_size: int) -> None:
     """Logs the score of a zero-skill baseline, so the epoch logs below have a bar to clear.
 
-    `target_mode="class"`: weighted cross-entropy / accuracy of always
-    predicting the train-set's empirical class-frequency distribution /
-    majority class (see `class_distance_weights`) — classes are
-    intentionally imbalanced (10/20/40/20/10 split), so this isn't a flat
-    1/num_classes chance.
-
-    `target_mode="zscore"`: weighted MSE + variance penalty (see
-    `weighted_mse_loss`, `variance_penalty`) / directional hit rate of always
-    predicting the train-set's mean z-score. Since that's a constant
-    prediction, `variance_penalty` evaluates to `target.std()**2` here —
-    showing exactly how hard the penalty pushes against this degenerate
-    "collapse to the mean" solution.
-
-    Both branches derive the baseline only from the train-set's empirical
-    target distribution (never looking at features), and use the same
-    outlier/variance weighting as training, so they're directly comparable
-    to the epoch logs below.
+    `target_mode="class"`: always predicting the train-set's empirical class-frequency
+    distribution / majority class — see `class_distance_weights`. Classes are intentionally
+    imbalanced (10/20/40/20/10 split), so this isn't a flat 1/num_classes chance.
+    `target_mode="zscore"`: always predicting the train-set's empirical mean z-score (the
+    regression analogue of "predict the class distribution" — the best constant-output
+    baseline under a squared-error loss). Either way, "acc" is a sign-match rate, comparable
+    across modes; both are derived only from the train-set's own target distribution (never
+    looking at features), using the same outlier weighting as training.
     """
     train_targets = collect_targets(train_ds)
     val_targets = collect_targets(val_ds)
 
-    if cfg.target_mode == "class":
-        train_targets = train_targets.astype(int)
-        val_targets = val_targets.astype(int)
-
-        class_counts = np.bincount(train_targets, minlength=output_size)
-        class_probs = np.clip(class_counts / class_counts.sum(), 1e-8, 1.0)
-        majority_class = int(class_counts.argmax())
-        weights = class_distance_weights(cfg.outlier_weight, output_size).numpy()
-
-        def weighted_ce(targets: np.ndarray) -> float:
-            return float(np.mean(weights[targets] * -np.log(class_probs[targets])))
-
-        def majority_accuracy(targets: np.ndarray) -> float:
-            return float(np.mean(targets == majority_class))
-
+    if cfg.target_mode != "class":
+        naive_pred = float(train_targets.mean())
+        weights_train = 1.0 + cfg.outlier_weight * (np.clip(np.abs(train_targets), 0.0, 3.0) / 3.0)
+        weights_val = 1.0 + cfg.outlier_weight * (np.clip(np.abs(val_targets), 0.0, 3.0) / 3.0)
+        train_loss = float(np.mean(weights_train * (naive_pred - train_targets) ** 2))
+        val_loss = float(np.mean(weights_val * (naive_pred - val_targets) ** 2))
+        train_acc = float(np.mean(np.sign(naive_pred) == np.sign(train_targets)))
+        val_acc = float(np.mean(np.sign(naive_pred) == np.sign(val_targets)))
         logger.info(
-            "Naive baseline class distribution (train set): %s",
-            {CLASS_NAMES[i]: f"{p:.1%}" for i, p in enumerate(class_probs)},
-        )
-        logger.info(
-            "Naive baseline (predict train-set class distribution; majority class=%s): "
+            "Naive baseline (predict train-set mean z-score=%.4f): "
             "train_loss=%.5f train_acc=%5.1f%%  val_loss=%.5f val_acc=%5.1f%%",
-            CLASS_NAMES[majority_class],
-            weighted_ce(train_targets), majority_accuracy(train_targets) * 100,
-            weighted_ce(val_targets), majority_accuracy(val_targets) * 100,
+            naive_pred, train_loss, train_acc * 100, val_loss, val_acc * 100,
         )
         return
 
-    baseline_pred = float(train_targets.mean())
+    train_targets = train_targets.astype(int)
+    val_targets = val_targets.astype(int)
 
-    def weighted_loss(targets: np.ndarray) -> float:
-        t = torch.as_tensor(targets, dtype=torch.float32)
-        p = torch.full_like(t, baseline_pred)
-        # A constant predictor has pred.std()==0, so this term evaluates to
-        # target.std()**2 — showing exactly how much variance_penalty
-        # punishes the degenerate "predict the mean everywhere" solution
-        # this baseline represents, matching what run_epoch actually optimizes.
-        loss = weighted_mse_loss(p, t, cfg.outlier_weight)
-        loss = loss + cfg.variance_penalty_weight * variance_penalty(p, t)
-        return loss.item()
+    class_counts = np.bincount(train_targets, minlength=output_size)
+    class_probs = np.clip(class_counts / class_counts.sum(), 1e-8, 1.0)
+    majority_class = int(class_counts.argmax())
+    weights = class_distance_weights(cfg.outlier_weight, output_size).numpy()
 
-    def directional_accuracy(targets: np.ndarray) -> float:
-        return float(np.mean(np.sign(targets) == np.sign(baseline_pred)))
+    def weighted_ce(targets: np.ndarray) -> float:
+        return float(np.mean(weights[targets] * -np.log(class_probs[targets])))
+
+    def majority_accuracy(targets: np.ndarray) -> float:
+        return float(np.mean(targets == majority_class))
 
     logger.info(
-        "Naive baseline (always predict train-set mean z-score=%.4f): "
+        "Naive baseline class distribution (train set): %s",
+        {CLASS_NAMES[i]: f"{p:.1%}" for i, p in enumerate(class_probs)},
+    )
+    logger.info(
+        "Naive baseline (predict train-set class distribution; majority class=%s): "
         "train_loss=%.5f train_acc=%5.1f%%  val_loss=%.5f val_acc=%5.1f%%",
-        baseline_pred,
-        weighted_loss(train_targets), directional_accuracy(train_targets) * 100,
-        weighted_loss(val_targets), directional_accuracy(val_targets) * 100,
+        CLASS_NAMES[majority_class],
+        weighted_ce(train_targets), majority_accuracy(train_targets) * 100,
+        weighted_ce(val_targets), majority_accuracy(val_targets) * 100,
     )
 
 
 def plot_predictions_grid(
-    model: LSTMAttentionForecaster,
+    model: LSTMSeqClassifier,
     datasets: dict[str, FXSequenceDataset],
     cfg: Config,
     path: str,
     sample_label: str = "out-of-sample (validation)",
 ) -> None:
-    """One panel per symbol: actual vs. predicted N-day target over time.
+    """One panel per symbol: actual vs. predicted N-day direction (class or continuous
+    z-score, depending on `cfg.target_mode`) over time.
 
     `datasets` can be either the out-of-sample (validation) or in-sample
     (training) per-symbol datasets from `build_target_dataset` — comparing
@@ -1332,17 +1266,12 @@ def plot_predictions_grid(
         ax.plot(actual, label="actual", linewidth=1.0, marker=".", markersize=3)
         ax.plot(predicted, label="predicted", linewidth=1.0, alpha=0.8, marker=".", markersize=3)
 
+        ax.axhline(0.0, color="grey", linewidth=0.5)
         if cfg.target_mode == "class":
-            num_classes = len(CLASS_NAMES)
-            ax.axhline((num_classes - 1) / 2.0, color="grey", linewidth=0.5)
-            ax.set_ylim(-0.5, num_classes - 0.5)
-            ax.set_yticks(range(num_classes))
+            ax.set_ylim(min(CLASS_VALUES) - 0.5, max(CLASS_VALUES) + 0.5)
+            ax.set_yticks(CLASS_VALUES)
             ax.set_yticklabels(CLASS_NAMES, fontsize=7)
-            ax.set_ylabel(symbol)
-        else:
-            ax.axhline(0.0, color="grey", linewidth=0.5)
-            ax.set_ylabel(f"{symbol}\n(z-score)")
-
+        ax.set_ylabel(symbol)
         ax.legend(loc="upper right", fontsize=8)
 
     axes[-1, 0].set_xlabel(f"{sample_label} sample (time-ordered, per symbol)")
@@ -1361,7 +1290,7 @@ def plot_predictions_grid(
     logger.info("Saved %s prediction data to %s", sample_label, csv_path)
 
 
-def train(model: LSTMAttentionForecaster, train_ds: Dataset, val_ds: Dataset, cfg: Config) -> float:
+def train(model: LSTMSeqClassifier, train_ds: Dataset, val_ds: Dataset, cfg: Config) -> float:
     """Trains `model` in place, then restores it to its best-val_loss epoch's weights.
 
     Given how weak the underlying signal is, the model reliably starts
@@ -1453,9 +1382,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon", type=int, default=5, help="N days ahead for the cumulative-return target.")
     parser.add_argument(
         "--target-mode",
-        choices=["zscore", "class"],
-        default="zscore",
-        help="Regression target: continuous return z-score (default) or 5-class direction label.",
+        choices=("class", "zscore"),
+        default="class",
+        help="'class' (default): predict the 5-way direction class under class-distance-"
+        "weighted cross-entropy. 'zscore': predict the continuous horizon return z-score "
+        "directly under a magnitude-weighted MSE loss — an alternative regression head over "
+        "the same trunk (see fx_forecasting.models.lstm_forecaster.LSTMSeqClassifier).",
     )
     parser.add_argument(
         "--cross-sectional-target",
@@ -1490,12 +1422,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra loss weight (linear in distance from the neutral class) for classes far from neutral. 0 = plain cross-entropy.",
     )
     parser.add_argument(
-        "--variance-penalty-weight",
-        type=float,
-        default=10.0,
-        help="target_mode='zscore' only: weight on (pred.std()-target.std())**2, to counteract collapse to a constant near-zero prediction (the model always predicting ~0 regardless of input). 0 disables.",
-    )
-    parser.add_argument(
         "--val-fraction",
         type=float,
         default=0.2,
@@ -1508,16 +1434,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fraction of each symbol's history held out as a final, untouched test set (evaluated once, after tuning).",
     )
     parser.add_argument(
-        "--no-predict-uncertainty",
-        dest="predict_uncertainty",
-        action="store_false",
-        default=True,
-        help="target_mode='zscore' only: disable the mean+log-variance head and Gaussian NLL loss, falling back to plain (weighted) MSE.",
-    )
-    parser.add_argument(
         "--use-spectral-features",
         action="store_true",
-        help="Compute a learned FFT-magnitude-spectrum summary of the cross-asset factor "
+        help="Compute a learned FFT-magnitude-spectrum summary of the cross-asset return "
         "sequence and feed it into the final prediction layer alongside the other side "
         "features (see fx_forecasting.models.spectral_embedding).",
     )
@@ -1571,8 +1490,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--regime-gate",
         action="store_true",
         help="Strategy backtest: zero the position whenever the cross-sectional (peer-median) "
-        "realized-vol regime is in its highest bucket (see regime_analysis.py for the "
-        "diagnostic this is based on). Backtest-only — doesn't affect training or the model.",
+        "realized-vol regime is in its highest bucket. Backtest-only — doesn't affect "
+        "training or the model.",
     )
     parser.add_argument("--regime-vol-window", type=int, default=20, help="Trailing realized-vol window feeding --regime-gate's label.")
     parser.add_argument(
@@ -1598,22 +1517,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pnl-plot-path",
         default="artifacts/lstm_pnl.png",
-        help="Where to save the validation strategy backtest cumulative-PnL plot (target_mode='zscore' only).",
+        help="Where to save the validation strategy backtest cumulative-PnL plot.",
     )
     parser.add_argument(
         "--test-pnl-plot-path",
         default="artifacts/lstm_pnl_test.png",
-        help="Where to save the final holdout (test) strategy backtest cumulative-PnL plot (target_mode='zscore' only).",
+        help="Where to save the final holdout (test) strategy backtest cumulative-PnL plot.",
     )
     parser.add_argument(
         "--positions-pnl-plot-path",
         default="artifacts/lstm_positions_pnl.png",
-        help="Where to save the validation position/return/PnL-with-and-without-costs detail plot (target_mode='zscore' only).",
+        help="Where to save the validation position/return/PnL-with-and-without-costs detail plot.",
     )
     parser.add_argument(
         "--test-positions-pnl-plot-path",
         default="artifacts/lstm_positions_pnl_test.png",
-        help="Where to save the final holdout (test) position/return/PnL-with-and-without-costs detail plot (target_mode='zscore' only).",
+        help="Where to save the final holdout (test) position/return/PnL-with-and-without-costs detail plot.",
     )
     parser.add_argument(
         "--model-path",
@@ -1644,8 +1563,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Load the best trial from an optimize_hyperparams.py results CSV and apply it on "
             "top of the flags above — overrides --seq-len, --horizon, --momentum-window, "
             "--vol-window, --hidden-size, --num-layers, --dropout, --lr, --weight-decay, "
-            "--outlier-weight, --variance-penalty-weight, --batch-size, "
-            "whichever of those the search actually covered (others are left as given)."
+            "--outlier-weight, --batch-size, whichever of those the search actually covered "
+            "(others are left as given)."
         ),
     )
     return parser
@@ -1686,10 +1605,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
         min_lr=args.min_lr,
         early_stop_patience=args.early_stop_patience,
         outlier_weight=args.outlier_weight,
-        variance_penalty_weight=args.variance_penalty_weight,
         val_fraction=args.val_fraction,
         test_fraction=args.test_fraction,
-        predict_uncertainty=args.predict_uncertainty,
         use_spectral_features=args.use_spectral_features,
         spectral_embedding_dim=args.spectral_embedding_dim,
         spectral_freq_bins=args.spectral_freq_bins,
@@ -1741,7 +1658,6 @@ def main(argv: list[str] | None = None) -> None:
         market_data_by_symbol,
         num_factors,
         num_side_features,
-        num_target_series,
         _feature_names,
     ) = build_target_dataset(cfg)
 
@@ -1752,10 +1668,12 @@ def main(argv: list[str] | None = None) -> None:
                 f"Checkpoint expects {checkpoint['num_factors']} factors but --pairs "
                 f"{cfg.pairs} currently produce {num_factors}; use the same --pairs as training."
             )
-        if checkpoint["target_mode"] != cfg.target_mode:
+        if checkpoint.get("target_mode", "class") != cfg.target_mode:
             raise ValueError(
-                f"Checkpoint was trained with target_mode={checkpoint['target_mode']!r} but "
-                f"--target-mode={cfg.target_mode!r} was given; use the same --target-mode as training."
+                f"Checkpoint was trained with target_mode={checkpoint.get('target_mode', 'class')!r} but "
+                f"--target-mode={cfg.target_mode!r} was given; use the same --target-mode as training "
+                f"(the model's output means something structurally different in each mode — class logits "
+                f"vs. a raw continuous value — and downstream signal/plot code would misinterpret it otherwise)."
             )
         if checkpoint.get("cross_sectional_target", False) != cfg.cross_sectional_target:
             raise ValueError(
@@ -1773,7 +1691,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"can stay identical while the forecast target changes)."
             )
     else:
-        model = build_model(cfg, num_factors, num_side_features, num_target_series)
+        model = build_model(cfg, num_factors, num_side_features)
         train(model, train_ds, val_ds, cfg)
         save_model(model, cfg, num_factors, cfg.model_path)
 

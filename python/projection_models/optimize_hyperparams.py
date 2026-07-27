@@ -161,10 +161,9 @@ def run_trial(x: np.ndarray, base_cfg: Config, specs: list[ParamSpec], raw: RawP
             _market_data,
             num_factors,
             num_side_features,
-            num_target_series,
             _feature_names,
         ) = build_target_dataset(cfg, raw=raw)
-        model = build_model(cfg, num_factors, num_side_features, num_target_series)
+        model = build_model(cfg, num_factors, num_side_features)
         loss = train(model, train_ds, val_ds, cfg)
         status = "ok"
         maybe_save_best_prediction_plot(cfg, model, val_datasets_by_symbol, loss, status, results_csv)
@@ -214,7 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         "as FAILED_TRIAL_PENALTY, unless seq_len is excluded from --params).",
     )
     parser.add_argument("--years", type=int, default=10, help="Data window to optimize over.")
-    parser.add_argument("--target-mode", choices=["zscore", "class"], default="zscore")
+    parser.add_argument(
+        "--target-mode", choices=("class", "zscore"), default="class",
+        help="'class' (default): search over the classification head. 'zscore': search over "
+        "the continuous z-score regression head instead — see main_lstm.py's --target-mode.",
+    )
     parser.add_argument(
         "--cross-sectional-target", action="store_true",
         help="Search for a model predicting target_symbol's return relative to the cross-"

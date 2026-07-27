@@ -1,6 +1,6 @@
 # FX Forecasting
 
-LSTM forecasters for FX pairs. Five entry points:
+LSTM forecasters for FX pairs. Entry points:
 
 - `pretrain_autoencoder.py` — trains the orthogonal cross-asset factor
   autoencoder `main_lstm.py` depends on: compresses the daily log returns of
@@ -8,15 +8,18 @@ LSTM forecasters for FX pairs. Five entry points:
   gradient-trained equivalent of PCA. Must be run once before `main_lstm.py`
   — see "Pretraining the cross-asset factor autoencoder" below.
 - `main_lstm.py` — the main model: forecasts one target symbol
-  (`--target-symbol`, mandatory) with an LSTM + attention decoder whose
-  recurrent input is that pretrained factor sequence concatenated with the
-  target symbol's own (normalized) log return series; everything else
-  (momentum, vol, skew, kurtosis, carry, intraday volatility, an optional
-  spectral/FFT summary) feeds the final prediction layer directly, not the
-  recurrence. `target_mode="zscore"` (continuous) or `"class"` (5-class
-  direction) target. Train, evaluate, or run inference.
+  (`--target-symbol`, mandatory) with a single, attention-free LSTM (no
+  encoder/decoder split) whose recurrent input is the raw cross-asset return
+  sequence itself, generating its own forecast by continuing that same
+  recurrence; the pretrained orthogonal factor snapshot, momentum, vol, skew,
+  kurtosis, carry, intraday volatility, and an optional spectral/FFT summary
+  all feed the final output layer directly, not the recurrence. `--target-mode`
+  picks between two alternative output heads over that same trunk: a 5-class
+  direction target (`class`, default — `very_bearish` .. `very_bullish`) or a
+  directly predicted continuous return z-score (`zscore`). Train, evaluate, or
+  run inference.
 - `simple_lstm.py` — a minimal alternative: one symbol at a time, a plain
-  LSTM (no attention, no cross-asset autoencoder), 3-class direction target
+  LSTM (no cross-asset autoencoder), 3-class direction target
   (bearish/neutral/bullish) — see the "Simple single-symbol model" section
   below.
 - `optimize_hyperparams.py` — search for good hyperparameters via
@@ -46,9 +49,9 @@ uv run python -m fx_forecasting.data.rates_downloader --upload
 
 ## Pretraining the cross-asset factor autoencoder — `pretrain_autoencoder.py`
 
-`main_lstm.py`'s LSTM never sees the raw, highly collinear `xret_<pair>` log
-returns (broad USD strength/weakness shows up in most FX pairs at once) —
-only a pretrained, orthogonal reduction of them. Train that reduction first:
+`main_lstm.py`'s final prediction layer (not the LSTM itself — see below) uses a pretrained,
+orthogonal reduction of the raw, highly collinear `xret_<pair>` log returns (broad USD
+strength/weakness shows up in most FX pairs at once). Train that reduction first:
 
 ```bash
 # Quick sanity check
@@ -95,21 +98,45 @@ uv run python main_lstm.py --pairs EURUSD USDJPY --target-symbol EURUSD \
 ```
 
 `--target-symbol` is mandatory: this architecture always forecasts exactly
-one pair. `--pairs` still supplies the full cross-asset input universe —
-every pair's own daily log return (`xret_<pair>`, target symbol included)
-feeds the pretrained factor autoencoder (`--autoencoder-path`, required; see
-"Pretraining the cross-asset factor autoencoder" above), whose orthogonal
-output feeds the LSTM concatenated with `target_symbol`'s own (normalized)
-log return sequence, uncompressed — giving the recurrence undiluted access
-to the series it's actually forecasting on top of the shared cross-asset
-structure the K->D reduction otherwise dilutes it into. Everything else —
-`target_symbol`'s own momentum, realized vol, skew, kurtosis, carry, and
-intraday volatility — bypasses the LSTM/attention entirely and is
-concatenated directly into the final prediction layer, alongside an optional
-spectral (FFT) summary of the combined sequence (`--use-spectral-features`).
-The pretrained encoder is frozen by default (`--fine-tune-autoencoder` opts
-into updating it during training — usually not necessary, and riskier under
-FX's non-stationary return distributions per Kumar et al. 2022).
+one pair. `--pairs` still supplies the full cross-asset input
+universe — every pair's own daily log return (`xret_<pair>`, target symbol
+included) feeds a single, attention-free LSTM *directly*, as a raw
+(rolling-normalized), full multi-channel sequence: the LSTM consumes the real
+history, then continues its own recurrence (same weights, no second module,
+no attention) to generate the forecast itself, so it learns its own temporal
+representation of the whole return history rather than being handed a
+pre-compressed one or attending back over it. The *same* cross-asset block, at
+the forecast origin's own last timestep only, is *also* reduced through the
+pretrained factor autoencoder (`--autoencoder-path`, required; see
+"Pretraining the cross-asset factor autoencoder" above) — a static,
+structurally-orthogonal snapshot of "where the whole universe stands right
+now" — and, along with `target_symbol`'s own momentum, realized vol, skew,
+kurtosis, carry, and intraday volatility, bypasses the LSTM entirely and is
+concatenated directly into the final output layer, alongside an optional
+spectral (FFT) summary of the LSTM's own input sequence
+(`--use-spectral-features`). The pretrained encoder is frozen by default
+(`--fine-tune-autoencoder` opts into updating it during training — usually
+not necessary, and riskier under FX's non-stationary return distributions
+per Kumar et al. 2022).
+
+`--target-mode` picks what that output layer produces, as two mutually exclusive
+alternatives over the identical trunk above:
+
+- `class` (default): 5 discrete direction classes (`very_bearish` .. `very_bullish` — see
+  `fx_forecasting.features.compute_target_class`), trained under a class-distance-weighted
+  `nn.CrossEntropyLoss` (`--outlier-weight`). A continuous trading signal is still derived
+  from the predicted class *distribution* — not just its most likely class — via
+  `main_lstm.collect_signal`: the expected value of a fixed per-class score
+  (very_bearish=-2 .. very_bullish=2) under the predicted probabilities, so position sizing
+  naturally scales with how conviction-weighted (lopsided) the distribution is, not just
+  which single class wins.
+- `zscore`: the continuous horizon return z-score itself, predicted directly, trained under a
+  magnitude-weighted MSE loss (also `--outlier-weight`, weighting large-|z| targets more).
+  The model's own output *is* the trading signal — no distribution to take an expectation
+  over.
+
+Neither mode dominates the other a priori — compare them like any other hyperparameter,
+under the same purged walk-forward + frozen test holdout discipline described below.
 
 Each symbol's history is split chronologically into train / validation / a
 final **test holdout** (`--val-fraction`, `--test-fraction`), with a
@@ -128,8 +155,8 @@ Each run writes to `artifacts/` by default:
 | File | Contents |
 |---|---|
 | `lstm_model.pt` | model checkpoint (weights + architecture/config needed to reload it) |
-| `lstm_predictions.png` / `..._in_sample.png` / `..._test.png` | actual vs. predicted target, one panel per symbol — validation / training / final holdout |
-| `lstm_pnl.png` / `lstm_pnl_test.png` | execution-aware strategy backtest — net cumulative PnL after transaction costs and carry (`target_mode="zscore"` only) — validation / final holdout |
+| `lstm_predictions.png` / `..._in_sample.png` / `..._test.png` | actual vs. predicted direction (class or continuous z-score, per `--target-mode`), one panel per symbol — validation / training / final holdout |
+| `lstm_pnl.png` / `lstm_pnl_test.png` | execution-aware strategy backtest — net cumulative PnL after transaction costs and carry — validation / final holdout |
 | `lstm_positions_pnl.png` / `..._test.png` | detail view, one panel per symbol: position size + that symbol's actual daily return, plus cumulative PnL with vs. without transaction costs on a second axis — the gap between the two PnL curves is exactly the cost paid for turnover |
 | `features.csv` | every symbol's normalized input features + target, long-format |
 
@@ -139,16 +166,14 @@ net_cumulative`) with the exact data the plot was built from —
 `dashboard.py` reads these to render an interactive version instead of the
 static PNG (see [Web dashboard](#web-dashboard--dashboardpy)).
 
-The strategy backtest (`fx_forecasting/trading.py`) is not the older
-z-score-vs-z-score diagnostic: position size comes from the model's own
-signal (predicted z-score, or mean/std when `--predict-uncertainty` is on),
-affine-calibrated against what actually realized on the *training* fold only
-(never validation/test), thresholded and leverage-scaled
-(`--signal-threshold`, `--signal-leverage`, `--max-position`), then evaluated
-against the *actual* next-day log return plus carry, net of a
-per-unit-turnover transaction cost (`--transaction-cost-bps`) — a flat
-position below the threshold trades nothing rather than sizing a position off
-low-confidence noise.
+The strategy backtest (`fx_forecasting/trading.py`) is not a z-score-vs-z-score diagnostic:
+position size comes from the model's own risk-graded signal (`main_lstm.collect_signal`,
+the expected value of the predicted class distribution), affine-calibrated against what
+actually realized on the *training* fold only (never validation/test), thresholded and
+leverage-scaled (`--signal-threshold`, `--signal-leverage`, `--max-position`), then evaluated
+against the *actual* next-day log return plus carry, net of a per-unit-turnover transaction
+cost (`--transaction-cost-bps`) — a flat position below the threshold trades nothing rather
+than sizing a position off low-confidence noise.
 
 Key flags (`--help` for the full list):
 
@@ -158,15 +183,16 @@ Key flags (`--help` for the full list):
 | `--target-symbol` | **required**: the one pair to forecast (must be in `--pairs`) |
 | `--autoencoder-path` | **required**: checkpoint from `pretrain_autoencoder.py` for this exact `--pairs`/`--seq-len` |
 | `--fine-tune-autoencoder` | allow the pretrained cross-asset encoder to keep updating during training (default: frozen) |
-| `--target-mode {zscore,class}` | regression on the continuous return z-score (default), or 5-class direction label |
+| `--target-mode` | `class` (default, 5-way direction) or `zscore` (direct continuous regression) — two alternative output heads over the same trunk |
+| `--cross-sectional-target` | train against return relative to the cross-sectional median of the other `--pairs` symbols, instead of absolute direction |
 | `--seq-len`, `--horizon` | LSTM lookback window (must match the autoencoder checkpoint's own `--seq-len`); N-day-ahead target horizon |
 | `--val-fraction`, `--test-fraction` | size of the validation fold and the final untouched test holdout |
 | `--momentum-window`, `--vol-window` | engineered-feature windows (FFN-side features, target symbol only) |
 | `--hidden-size`, `--num-layers`, `--dropout` | LSTM architecture |
-| `--no-predict-uncertainty` | disable the mean+log-variance head / Gaussian NLL loss (`target_mode="zscore"`), falling back to plain (weighted) MSE |
-| `--use-spectral-features`, `--spectral-embedding-dim`, `--spectral-freq-bins` | append a learned FFT-magnitude-spectrum embedding of the factor sequence directly into the final prediction layer, alongside the other side features (off by default — see `fx_forecasting/models/spectral_embedding.py`) |
+| `--use-spectral-features`, `--spectral-embedding-dim`, `--spectral-freq-bins` | append a learned FFT-magnitude-spectrum embedding of the LSTM's own input sequence directly into the final prediction layer, alongside the other side features (off by default — see `fx_forecasting/models/spectral_embedding.py`) |
 | `--lr`, `--weight-decay`, `--epochs`, `--early-stop-patience` | training |
-| `--outlier-weight`, `--variance-penalty-weight` | loss shaping (weight extreme moves more; resist collapsing to a constant near-zero prediction) — both default to 10 (nonzero, active) for this architecture; still worth validating via purged walk-forward, not a substitute for that discipline |
+| `--outlier-weight` | loss shaping: extra cross-entropy weight (linear in distance from the neutral class) for classes far from neutral — default 10, prioritizes correctly calling large moves over the far more common near-neutral days |
+| `--regime-gate`, `--regime-vol-window`, `--regime-window`, `--regime-n-regimes` | backtest-only: zero the position whenever the cross-sectional (peer-median) realized-vol regime is in its highest bucket (see `fx_forecasting.features.compute_volatility_regime`) — motivated by a diagnostic finding that hit rate was consistently worse in high-market-vol periods |
 | `--transaction-cost-bps`, `--signal-threshold`, `--signal-leverage`, `--max-position` | execution-aware backtest: turnover cost, minimum signal to trade at all, position scale, and cap |
 | `--infer` | skip training, just load `--model-path` and evaluate/plot (the autoencoder's weights are already baked into that checkpoint) |
 | `--params-csv` | apply the best trial from an `optimize_hyperparams.py` run (see below) |
@@ -186,7 +212,7 @@ multi-symbol model:
 - **3-class target**: bearish (-1) / neutral (0) / bullish (+1) for the
   `--horizon`-day-ahead cumulative return (30/40/30 quantile split — see
   `fx_forecasting.features.compute_target_direction`), rather than
-  `main_lstm.py`'s 5-class or continuous z-score target.
+  `main_lstm.py`'s 5-class target.
 
 It still reuses `main_lstm.py`'s feature engineering (return, intraday_vol,
 momentum, rvol, carry, CMA crossovers) and Postgres/FRED data loading, so the
@@ -236,8 +262,7 @@ uv run python optimize_hyperparams.py --load artifacts/hparam_search.csv
 
 Searchable parameter names (for `--params`): `seq_len`, `horizon`,
 `momentum_window`, `vol_window`, `hidden_size`, `num_layers`, `dropout`,
-`lr`, `weight_decay`, `outlier_weight`, `variance_penalty_weight`,
-`batch_size`. Edit
+`lr`, `weight_decay`, `outlier_weight`, `batch_size`. Edit
 `DEFAULT_PARAM_SPECS` in `fx_forecasting/hparam_search.py` to change bounds
 or add new ones. Note: including `seq_len` in the search means most sampled
 values won't match `--autoencoder-path`'s own pretrained `seq_len` — those
@@ -253,6 +278,7 @@ Key flags:
 | `--pairs`, `--years` | cross-asset input universe and data window to optimize over (kept small/fast on purpose) |
 | `--target-symbol` | **required**: search for a model forecasting only this one pair (must be in `--pairs`) |
 | `--autoencoder-path` | **required**: pretrained checkpoint from `pretrain_autoencoder.py` (see above) |
+| `--target-mode` | `class` (default) or `zscore` — search over whichever output head you plan to actually train (see `main_lstm.py`'s own `--target-mode`) |
 | `--params` | subset of parameters to search; default is all of them |
 | `--trial-epochs`, `--trial-early-stop-patience` | per-trial training budget — keep small for speed |
 | `--maxiter`, `--popsize`, `--workers` | DE search budget / parallelism |
@@ -283,8 +309,8 @@ itself needs.
 ## Web dashboard — `dashboard.py`
 
 A Dash UI over `pretrain_autoencoder.py`, `main_lstm.py`, and
-`optimize_hyperparams.py` (not `simple_lstm.py`, which has no dashboard tab
-yet), so you don't need the terminal for routine runs:
+`optimize_hyperparams.py` (not `simple_lstm.py` or the GBT scripts, which
+have no dashboard tab yet), so you don't need the terminal for routine runs:
 
 ```bash
 uv run python dashboard.py
